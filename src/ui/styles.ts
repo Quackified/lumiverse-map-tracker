@@ -214,4 +214,5 @@ textarea.mt-input { height: auto; padding: 6px 8px; resize: vertical; width: 100
 .mt-drawer-bar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--mt-border); flex: none; }
 .mt-drawer-body { flex: 1; min-height: 0; display: flex; }
 .mt-drawer-idle { padding: 20px 12px; text-align: center; }
+.mt-error { color: var(--mt-danger); font-size: 12px; }
 `

@@ -407,6 +407,9 @@ async function handle(msg: FrontendMessage, userId?: string): Promise<void> {
       break
     case 'tagPos':
       return applyTag(msg.chatId, msg.messageId, msg.x, msg.y, userId)
+    case 'closeDrawer':
+      // So a window popped out from the drawer isn't left underneath it.
+      return void (await spindle.ui.closeDrawer({ userId }).catch(() => {}))
     case 'listWorldBooks': {
       if (!spindle.permissions.has('world_books')) return notice('warning', 'Grant the world_books permission to import from a lorebook.', userId)
       const { data } = await spindle.world_books.list({ limit: 500, userId })

@@ -175,8 +175,16 @@ export class MapWindow {
 
   // ── Workspace ─────────────────────────────────────────────────────────────
 
+  /** Host UI scale as a factor (1 = 100%). Anything odd falls back to 1. */
   private uiScale(): number {
-    return this.ctx.ui.geometry?.getUiScale() || 1
+    let k = 1
+    try {
+      k = Number(this.ctx.ui.geometry?.getUiScale?.() ?? 1)
+    } catch {
+      return 1
+    }
+    if (k >= 25 && k <= 300) k /= 100 // reported as a percentage
+    return Number.isFinite(k) && k >= 0.25 && k <= 3 ? k : 1
   }
 
   /** Pointer client coordinates → layout pixels (they differ under UI scaling). */
@@ -185,12 +193,8 @@ export class MapWindow {
     return { x: e.clientX / k, y: e.clientY / k }
   }
 
+  /** Placement space for the float widget, the same coordinates moveTo() uses. */
   private viewport(): Rect {
-    const g = this.ctx.ui.geometry
-    if (g) {
-      const v = g.layoutViewportSize()
-      if (v.width > 0 && v.height > 0) return { x: 0, y: 0, w: v.width, h: v.height }
-    }
     return { x: 0, y: 0, w: window.innerWidth, h: window.innerHeight }
   }
 
@@ -220,7 +224,12 @@ export class MapWindow {
 
   private areas(): Areas {
     const full = this.viewport()
-    const chat = this.avoidChat ? this.chatColumn() : null
+    let chat: Areas['chat'] = null
+    try {
+      chat = this.avoidChat ? this.chatColumn() : null
+    } catch (err) {
+      console.warn('[Map Tracker] Could not measure the chat column:', err)
+    }
     if (!chat) return { full, left: null, right: null, chat: null }
     const lw = chat.l - full.x
     const rw = full.x + full.w - chat.r

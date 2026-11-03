@@ -16,6 +16,8 @@ export function setup(ctx: SpindleFrontendContext) {
 
   let win: MapWindow | null = null
   let docked = false
+  /** Why the floating window couldn't open, shown in the drawer until it works. */
+  let windowError: string | null = null
 
   const drawer = ctx.ui.registerDrawerTab({
     id: 'map',
@@ -32,9 +34,13 @@ export function setup(ctx: SpindleFrontendContext) {
 
   function renderDrawer(): void {
     drawerBar.replaceChildren(
-      h('span', { class: 'mt-dim mt-grow' }, docked ? 'Docked in sidebar' : win?.isVisible() ? 'Open in a floating window' : 'Map is closed'),
+      h(
+        'span',
+        { class: `mt-grow ${windowError ? 'mt-error' : 'mt-dim'}` },
+        windowError ? `Couldn't open the floating window: ${windowError}` : docked ? 'Docked in sidebar' : win?.isVisible() ? 'Open in a floating window' : 'Map is closed',
+      ),
       docked
-        ? h('button', { class: 'mt-btn', onclick: () => void openWindow() }, icon('popout'), 'Pop out')
+        ? h('button', { class: 'mt-btn', onclick: () => void openWindow(true) }, icon('popout'), 'Pop out')
         : h('button', { class: 'mt-btn', onclick: () => dock() }, icon('dock'), 'Show here'),
     )
     if (docked) {
@@ -45,7 +51,7 @@ export function setup(ctx: SpindleFrontendContext) {
           'div',
           { class: 'mt-drawer-idle mt-grow' },
           h('p', { class: 'mt-dim' }, 'The map works best as a floating window you can snap beside the chat.'),
-          h('button', { class: 'mt-btn mt-primary', onclick: () => void openWindow() }, icon('popout'), 'Open map window'),
+          h('button', { class: 'mt-btn mt-primary', onclick: () => void openWindow(true) }, icon('popout'), 'Open map window'),
         ),
       )
     }
@@ -61,33 +67,35 @@ export function setup(ctx: SpindleFrontendContext) {
     }
   }
 
-  async function openWindow(): Promise<void> {
+  async function openWindow(fromDrawer = false): Promise<void> {
     if (!(await ensurePanels())) {
+      windowError = 'the ui_panels permission is not granted'
       dock()
       return
     }
-    if (!win) {
-      try {
-        win = new MapWindow(ctx, {
-          title: 'Map',
-          content: app.el,
-          onClose: () => {
-            win?.setVisible(false)
-            renderDrawer()
-          },
-          onDock: () => dock(),
-        })
-      } catch (err) {
-        console.error('[Map Tracker] Could not create the map window:', err)
-        dock()
-        return
-      }
+    try {
+      win ??= new MapWindow(ctx, {
+        title: 'Map',
+        content: app.el,
+        onClose: () => {
+          win?.setVisible(false)
+          renderDrawer()
+        },
+        onDock: () => dock(),
+      })
+      docked = false
+      win.adopt()
+      win.setVisible(true)
+      windowError = null
+    } catch (err) {
+      console.error('[Map Tracker] Could not open the map window:', err)
+      windowError = err instanceof Error ? err.message : String(err)
+      dock()
+      return
     }
-    docked = false
-    win.adopt()
-    win.setVisible(true)
     app.refreshTheme()
     renderDrawer()
+    if (fromDrawer) send({ type: 'closeDrawer' })
   }
 
   function dock(): void {

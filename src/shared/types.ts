@@ -179,6 +179,7 @@ export type FrontendMessage =
   | { type: 'saveSettings'; settings: Partial<Settings> }
   | { type: 'tagPos'; chatId: string; messageId: string; x: number; y: number }
   | { type: 'listWorldBooks' }
+  | { type: 'closeDrawer' }
   | { type: 'listWorldBookEntries'; bookId: string }
 
 export interface StatePayload {

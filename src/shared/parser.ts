@@ -28,7 +28,7 @@ export interface ParseResult {
 
 const NUM = String.raw`[-−]?\d+(?:\.\d+)?`
 /** "[x,y]" or "(x, y)"; a bracket right after a lone X/Y is a span, not a point. */
-const POINT_RE = new RegExp(String.raw`(?<!(?:^|[^A-Za-z])[XYxy]\s*)(?:\[\s*(${NUM})\s*,\s*(${NUM})\s*\]|\(\s*(${NUM})\s*,\s*(${NUM})\s*\))`, 'g')
+export const POINT_RE = new RegExp(String.raw`(?<!(?:^|[^A-Za-z])[XYxy]\s*)(?:\[\s*(${NUM})\s*,\s*(${NUM})\s*\]|\(\s*(${NUM})\s*,\s*(${NUM})\s*\))`, 'g')
 /** Coordinate-system notes ("Origin: (0,0)") that look like points but aren't places. */
 const NOT_A_PLACE = /^(origin|cent(er|re)|axes|axis|scale|distance|range)$/i
 const BRACKET_RE = new RegExp(String.raw`\b([XY])\s*\[\s*(${NUM})\s*,\s*(${NUM})\s*\]`, 'gi')

@@ -4,6 +4,7 @@ import { FEATURE_TYPES, LAYER_LABEL, LAYER_ORDER, featuresFromJson, featuresToGe
 import { entriesFromLorebookJson, hasMapData, parseMapEntries } from '../shared/mapext'
 import { mergeInto, newProfile, parseCoordinateText, slug, type ParseResult } from '../shared/parser'
 import { VAR_NAME_RE, isMoved, movePoint, placeRef, placeText, placesVarName, revertPoint } from '../shared/places'
+import { applyRefs, findCoords, guessName, resolveRefs, type CoordHit } from '../shared/convert'
 import type {
   BackendMessage,
   Bounds,
@@ -12,6 +13,7 @@ import type {
   FeatureLayer,
   FrontendMessage,
   LayerSettings,
+  LorebookBackupSummary,
   MapImageMeta,
   InjectMode,
   Poi,
@@ -23,6 +25,7 @@ import type {
 import { clear, debounce, enableScrub, h, hueOf, icon, numOrNull } from './dom'
 import { History } from './history'
 import { MapView, type Layers, type Tool } from './viewport'
+import { DENSITY_PRESETS, hasSymbols } from './terrain'
 
 type Tab = 'chat' | 'points' | 'zones' | 'layers' | 'import' | 'image' | 'map'
 
@@ -49,6 +52,19 @@ const TOOL_HINT: Partial<Record<Tool, string>> = {
   vline: 'Click to add points or drag freehand; Enter or double-click finishes. Space+drag pans.',
   vspot: 'Click to place.',
   pmove: 'Drag places to move them (Shift 10, Alt 0.1); arrows nudge. Rings mark lorebook positions.',
+}
+
+interface ConvHit extends CoordHit {
+  on: boolean
+  /** Name to add as a new place when the literal matches none. */
+  addName: string | null
+}
+
+interface ConvRow {
+  id: string
+  name: string
+  content: string
+  hits: ConvHit[]
 }
 
 const UI_KEY = 'map_tracker.ui'
@@ -114,6 +130,11 @@ export class MapApp {
   private importPreview: ParseResult | null = null
   private books: { id: string; name: string }[] = []
   private entries: WorldBookEntryLite[] = []
+  private bookId = ''
+  /** Lorebook conversion preview: literal coordinates per entry, each with its own checkbox. */
+  private convert: ConvRow[] | null = null
+  private backups: LorebookBackupSummary[] = []
+  private confirmRestore: string | null = null
   private ro: ResizeObserver
   private pendingSave = false
   private flushSave = debounce(() => {
@@ -316,8 +337,17 @@ export class MapApp {
         this.renderSide(true)
         break
       case 'worldBookEntries':
+        if (msg.bookId !== this.bookId) this.convert = null
+        this.bookId = msg.bookId
         this.entries = msg.entries
         this.renderSide(true)
+        break
+      case 'lorebookBackups':
+        this.backups = msg.backups
+        if (this.tab === 'import') this.renderSide(true)
+        break
+      case 'lorebookApplied':
+        this.convert = null
         break
       case 'notice':
         break
@@ -1183,9 +1213,26 @@ export class MapApp {
       body.append(h('div', { class: 'mt-dim' }, 'Grant the world_books permission to pull entries directly.'))
     } else {
       const bookSel = h('select', { class: 'mt-select mt-grow' }, h('option', { value: '' }, this.books.length ? 'Choose a lorebook…' : '—'))
-      for (const b of this.books) bookSel.append(h('option', { value: b.id }, b.name))
+      for (const b of this.books) bookSel.append(h('option', { value: b.id, selected: b.id === this.bookId }, b.name))
       bookSel.addEventListener('change', () => bookSel.value && this.send({ type: 'listWorldBookEntries', bookId: bookSel.value }))
-      body.append(h('div', { class: 'mt-row' }, h('button', { class: 'mt-btn', onclick: () => this.send({ type: 'listWorldBooks' }) }, 'Load lorebooks'), bookSel))
+      body.append(
+        h(
+          'div',
+          { class: 'mt-row' },
+          h(
+            'button',
+            {
+              class: 'mt-btn',
+              onclick: () => {
+                this.send({ type: 'listWorldBooks' })
+                this.send({ type: 'listLorebookBackups' })
+              },
+            },
+            'Load lorebooks',
+          ),
+          bookSel,
+        ),
+      )
       const mapped = this.entries.filter((e) => e.map)
       if (mapped.length) {
         body.append(
@@ -1220,12 +1267,15 @@ export class MapApp {
         entrySel.addEventListener('change', () => {
           const e = this.entries.find((q) => q.id === entrySel.value)
           if (!e) return
-          this.importText = e.content
-          this.importPreview = parseCoordinateText(e.content)
+          // Converted entries hold map references; read them as the coordinates they stand for.
+          this.importText = resolveRefs(e.content, this.profile)
+          this.importPreview = parseCoordinateText(this.importText)
           this.renderSide(true)
         })
         body.append(h('div', { class: 'mt-row' }, entrySel))
+        if (p) body.append(this.convertSection(p))
       }
+      if (this.backups.length) body.append(this.backupList())
     }
 
     body.append(
@@ -1238,6 +1288,203 @@ export class MapApp {
       ),
       h('div', { class: 'mt-dim' }, 'A map file holds points, zones, crop and calibration (the image is uploaded separately). A lorebook export with map fields works too.'),
     )
+  }
+
+  // ── Lorebook conversion ─────────────────────────────────────────────────
+
+  private convertSection(p: WorldProfile): HTMLElement {
+    const box = h('div', { class: 'mt-preview' })
+    const varName = p.placesVar ?? placesVarName(p.name)
+    box.append(
+      h('b', null, 'Convert coordinates to map references'),
+      h(
+        'div',
+        { class: 'mt-dim' },
+        'Replaces literal coordinates in these entries with ',
+        h('span', { class: 'mt-var' }, placeRef(varName, 'place-id')),
+        ', so the map owns positions. Nothing is written until you apply, and the original text is kept for Restore.',
+      ),
+    )
+    const rows = this.convert
+    if (!rows) {
+      box.append(
+        h(
+          'div',
+          { class: 'mt-row' },
+          h(
+            'button',
+            {
+              class: 'mt-btn mt-primary',
+              onclick: () => {
+                this.convert = this.buildConversion(p)
+                this.renderSide(true)
+              },
+            },
+            'Find coordinates',
+          ),
+        ),
+      )
+      return box
+    }
+
+    const all = rows.flatMap((r) => r.hits)
+    const count = (by: string) => all.filter((x) => x.by === by).length
+    const unmatched = all.filter((x) => !x.placeId)
+    if (!all.length) {
+      box.append(h('div', null, 'No literal coordinates left in these entries.'), h('div', { class: 'mt-row' }, h('button', { class: 'mt-btn mt-ghost', onclick: () => ((this.convert = null), this.renderSide(true)) }, 'Close')))
+      return box
+    }
+    box.append(
+      h(
+        'div',
+        null,
+        `${all.length} coordinates in ${rows.length} ${rows.length === 1 ? 'entry' : 'entries'}: ${count('name')} by name`,
+        count('title') ? `, ${count('title')} by entry title` : '',
+        count('coords') ? h('span', { class: 'mt-warn' }, `, ${count('coords')} by position only`) : '',
+        unmatched.length ? h('span', { class: 'mt-dim' }, `, ${unmatched.length} with no place`) : '',
+        '.',
+      ),
+    )
+    const applyBtn = h('button', { class: 'mt-btn mt-primary' })
+    const refresh = () => {
+      const n = all.filter((x) => x.on).length
+      applyBtn.textContent = `Apply ${n} ${n === 1 ? 'change' : 'changes'}`
+      applyBtn.disabled = n === 0
+    }
+    for (const r of rows) {
+      const det = h('details', { class: 'mt-group', open: rows.length <= 3 }, h('summary', null, h('span', null, r.name), h('span', { class: 'mt-dim' }, ` ${r.hits.length}`)))
+      for (const x of r.hits) det.append(this.convRow(x, varName, refresh))
+      box.append(det)
+    }
+    applyBtn.addEventListener('click', () => this.applyConversion(p))
+    refresh()
+    box.append(
+      h(
+        'div',
+        { class: 'mt-row' },
+        applyBtn,
+        h('span', { class: 'mt-spacer' }),
+        h('button', { class: 'mt-btn mt-ghost', onclick: () => ((this.convert = null), this.renderSide(true)) }, 'Cancel'),
+      ),
+    )
+    if (!p.placesVar) box.append(h('div', { class: 'mt-dim' }, `Applying also turns on the lorebook variable (${varName}).`))
+    return box
+  }
+
+  private convRow(x: ConvHit, varName: string, refresh: () => void): HTMLElement {
+    const check = h('input', { type: 'checkbox', checked: x.on })
+    check.addEventListener('change', () => {
+      x.on = check.checked
+      refresh()
+    })
+    const at = x.start - x.lineStart
+    const pre = x.line.slice(Math.max(0, at - 48), at)
+    const post = x.line.slice(at + x.literal.length, at + x.literal.length + 32)
+    const clip = (s: string, left: boolean) => (left ? (at > 48 ? '…' : '') + s : s + (x.line.length > at + x.literal.length + 32 ? '…' : ''))
+    const target = x.placeId ? placeRef(varName, x.placeId) : x.addName ? placeRef(varName, slug(x.addName)) : null
+    const label = x.placeId
+      ? h('span', { class: x.by === 'coords' ? 'mt-warn' : 'mt-dim' }, `${x.placeName} · ${x.by === 'name' ? 'named here' : x.by === 'title' ? 'entry title' : 'same position only, check it'}`)
+      : x.addName
+        ? h('span', { class: 'mt-dim' }, `No place yet · adds “${x.addName}” to the map`)
+        : h('span', { class: 'mt-dim' }, 'No matching place; left as is')
+    return h(
+      'label',
+      { class: 'mt-conv' },
+      x.placeId || x.addName ? check : h('span'),
+      h(
+        'div',
+        null,
+        label,
+        h('div', { class: 'mt-conv-line' }, clip(pre, true), h('span', { class: 'mt-del' }, x.literal), clip(post, false)),
+        target ? h('div', { class: 'mt-conv-line' }, clip(pre, true), h('span', { class: 'mt-ins' }, target), clip(post, false)) : '',
+      ),
+    )
+  }
+
+  private buildConversion(p: WorldProfile): ConvRow[] {
+    const rows: ConvRow[] = []
+    for (const e of this.entries) {
+      const hits = findCoords(e.content, e.name, p.points).map((x): ConvHit => {
+        const addName = x.placeId ? null : guessName(x)
+        // Matches by name or title start ticked; position-only matches and new places are opt-in.
+        return { ...x, on: x.by === 'name' || x.by === 'title', addName }
+      })
+      if (hits.length) rows.push({ id: e.id, name: e.name, content: e.content, hits })
+    }
+    return rows
+  }
+
+  private applyConversion(p: WorldProfile): void {
+    const rows = this.convert
+    if (!rows) return
+    const varName = p.placesVar ?? placesVarName(p.name)
+    // New places first, so their ids exist before entries point at them.
+    const used = new Set(p.points.map((q) => q.id))
+    const added: Poi[] = []
+    for (const x of rows.flatMap((r) => r.hits)) {
+      if (!x.on || x.placeId || !x.addName) continue
+      const same = added.find((a) => a.name.toLowerCase() === x.addName!.toLowerCase())
+      if (same) {
+        x.placeId = same.id
+        continue
+      }
+      let id = slug(x.addName)
+      for (let i = 2; used.has(id); i++) id = `${slug(x.addName)}-${i}`
+      used.add(id)
+      added.push({ id, name: x.addName, x: x.x, y: x.y, group: 'From lorebook' })
+      x.placeId = id
+    }
+    const changes = rows
+      .map((r) => ({ id: r.id, name: r.name, before: r.content, after: applyRefs(r.content, r.hits.filter((x) => x.on && x.placeId), varName) }))
+      .filter((c) => c.after !== c.before)
+    if (!changes.length) return this.warn('Nothing selected.')
+    if (added.length || !p.placesVar) {
+      this.mutate((d) => {
+        d.placesVar = varName
+        d.points.push(...added)
+      })
+      this.flushSave.flush()
+    }
+    const book = this.books.find((b) => b.id === this.bookId)
+    this.send({ type: 'applyLorebookRefs', bookId: this.bookId, bookName: book?.name ?? 'Lorebook', changes })
+    this.convert = null
+    this.renderSide(true)
+  }
+
+  private backupList(): HTMLElement {
+    const det = h('details', { class: 'mt-group' }, h('summary', null, h('span', null, 'Lorebook backups'), h('span', { class: 'mt-dim' }, ` ${this.backups.length}`)))
+    for (const b of this.backups) {
+      const armed = this.confirmRestore === b.id
+      det.append(
+        h(
+          'div',
+          { class: 'mt-row' },
+          h(
+            'span',
+            { class: 'mt-grow' },
+            `${b.bookName} · ${new Date(b.at).toLocaleString()} · ${b.count} ${b.count === 1 ? 'entry' : 'entries'}`,
+            h('span', { class: 'mt-dim' }, b.reason === 'restore' ? ' · before a restore' : ' · before converting'),
+          ),
+          h(
+            'button',
+            {
+              class: `mt-btn${armed ? ' mt-danger' : ''}`,
+              title: 'Put these entries back to the saved text',
+              onclick: () => {
+                if (!armed) {
+                  this.confirmRestore = b.id
+                  return this.renderSide(true)
+                }
+                this.confirmRestore = null
+                this.send({ type: 'restoreLorebookBackup', backupId: b.id })
+              },
+            },
+            armed ? 'Confirm restore' : 'Restore',
+          ),
+        ),
+      )
+    }
+    return det
   }
 
   private applyImport(): void {
@@ -1581,10 +1828,19 @@ export class MapApp {
       el.addEventListener('change', () => update({ elevation: numOrNull(el.value) ?? undefined }))
       fields.push(h('label', null, 'Elevation'), el)
     }
-    if (f.geom === 'spot') {
+    const ranged = f.geom === 'line' && (f.type === 'mountains' || f.type === 'hills')
+    if (f.geom === 'spot' || hasSymbols(f) || ranged) {
       const el = h('input', { class: 'mt-input', type: 'number', step: '0.1', min: '0.3', max: '6', value: String(f.size ?? 1) })
       el.addEventListener('change', () => update({ size: Math.max(0.3, Math.min(6, numOrNull(el.value) ?? 1)) }))
-      fields.push(h('label', null, 'Size'), el)
+      fields.push(h('label', null, f.geom === 'spot' ? 'Size' : 'Symbol size'), el)
+    }
+    if (hasSymbols(f)) {
+      const sel = h('select', { class: 'mt-select' })
+      const cur = f.density ?? 1
+      for (const [v, label] of DENSITY_PRESETS) sel.append(h('option', { value: String(v), selected: Math.abs(v - cur) < 1e-6 }, label))
+      if (!DENSITY_PRESETS.some(([v]) => Math.abs(v - cur) < 1e-6)) sel.append(h('option', { value: String(cur), selected: true }, `Custom (${cur})`))
+      sel.addEventListener('change', () => update({ density: Number(sel.value) === 1 ? undefined : Number(sel.value) }))
+      fields.push(h('label', null, 'Density'), sel)
     }
     const color = h('input', { class: 'mt-color', type: 'color', value: f.color || '#7aa2ff' })
     color.addEventListener('change', () => update({ color: color.value }))

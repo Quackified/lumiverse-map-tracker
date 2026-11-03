@@ -3,6 +3,7 @@ import { existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import manifest from '../spindle.json'
 import { movePoint, placeRef, placesVarName, placesVarValue, revertPoint } from '../src/shared/places'
+import { applyRefs, findCoords, guessName, resolveRefs } from '../src/shared/convert'
 import {
   bearing,
   buildContext,
@@ -471,5 +472,51 @@ describe('moving places', () => {
     expect(value).toEqual({ 'shackle-city': '(-20, 60)', x: '(0.5, 0)' })
     expect(placeRef('endwright_places', 'shackle-city')).toBe('{{getchatvarkey::endwright_places::shackle-city}}')
     expect(placeRef('v', '2024')).toBe('{{getchatvarkey::v::["2024"]}}')
+  })
+})
+
+describe('lorebook conversion', () => {
+  const pts: Poi[] = [
+    { id: 'shackle-city', name: 'Shackle City', x: -26, y: 67, group: 'G', origin: { x: -20, y: 60 } },
+    { id: 'port-of-joy-feiyue-port', name: 'Port of Joy (Feiyue Port)', x: -175, y: 140, group: 'G' },
+    { id: 'bluewatch-village', name: 'Bluewatch Village', x: 60, y: 50, group: 'G' },
+    { id: 'joy', name: 'Joy', x: 1, y: 1, group: 'G' },
+  ]
+  const text = [
+    '* **Shackle City** (-20, 60), a slave market.',
+    'Feiyue Port:[-175,140] and Blue Lookout Village:[60,50]',
+    'Thunderpeak Summit [-35, 60]. Range: X[-45,0] AND Y[0,150]',
+    'Origin: (0,0) center',
+  ].join('\n')
+
+  it('matches literals to places by name, alias, title and position', () => {
+    const hits = findCoords(text, 'Map_coordinate', pts)
+    expect(hits.map((h) => [h.literal, h.placeId, h.by ?? null])).toEqual([
+      ['(-20, 60)', 'shackle-city', 'name'],
+      ['[-175,140]', 'port-of-joy-feiyue-port', 'name'],
+      ['[60,50]', 'bluewatch-village', 'coords'],
+      ['[-35, 60]', null, null],
+      ['(0,0)', null, null],
+    ])
+    expect(guessName(hits[3])).toBe('Thunderpeak Summit')
+    expect(guessName(hits[4])).toBeNull()
+    const titled = findCoords('Coordinates: (5, 5)', 'Shackle City', pts)
+    expect([titled[0].placeId, titled[0].by]).toEqual(['shackle-city', 'title'])
+    // Another name before the literal beats the entry title.
+    const mixed = findCoords('Shackle City (-20, 60) is a market. Thunderpeak Summit [-35, 60] looms.', 'Shackle City', pts)
+    expect(mixed.map((h) => [h.placeId, h.by ?? null])).toEqual([['shackle-city', 'name'], [null, null]])
+    expect(guessName(mixed[1])).toBe('Thunderpeak Summit')
+  })
+
+  it('rewrites chosen literals and reads references back as coordinates', () => {
+    const profile: WorldProfile = { ...newProfile('Endwright', 'e'), points: pts, placesVar: 'endwright_places' }
+    const hits = findCoords(text, '', pts).filter((h) => h.by === 'name')
+    const out = applyRefs(text, hits, 'endwright_places')
+    expect(out.split('\n')[0]).toBe('* **Shackle City** {{getchatvarkey::endwright_places::shackle-city}}, a slave market.')
+    expect(out).toContain('Blue Lookout Village:[60,50]')
+    const back = resolveRefs(out, profile)
+    expect(back.split('\n')[0]).toBe('* **Shackle City** (-26, 67), a slave market.')
+    expect(parseCoordinateText(back).points.find((p) => p.name === 'Shackle City')).toMatchObject({ x: -26, y: 67 })
+    expect(findCoords(out, '', pts).some((h) => h.placeId === 'shackle-city')).toBe(false)
   })
 })

@@ -117,8 +117,10 @@ export interface Feature {
   smooth?: boolean
   /** Topography: height of this contour. */
   elevation?: number
-  /** Spot symbol size multiplier. */
+  /** Symbol size multiplier (spots, terrain symbols, mountain and hill ranges). */
   size?: number
+  /** Terrain symbol density: 0.4 sparse … 1 normal … 2.2 very dense. */
+  density?: number
   color?: string
   hidden?: boolean
 }
@@ -222,6 +224,10 @@ export type FrontendMessage =
   | { type: 'listWorldBooks' }
   | { type: 'closeDrawer' }
   | { type: 'listWorldBookEntries'; bookId: string }
+  /** Write converted entry text. `before` guards against entries edited since the preview. */
+  | { type: 'applyLorebookRefs'; bookId: string; bookName: string; changes: { id: string; name: string; before: string; after: string }[] }
+  | { type: 'listLorebookBackups' }
+  | { type: 'restoreLorebookBackup'; backupId: string }
 
 export interface StatePayload {
   type: 'state'
@@ -243,9 +249,22 @@ export interface WorldBookEntryLite {
   map?: unknown
 }
 
+export interface LorebookBackupSummary {
+  id: string
+  bookId: string
+  bookName: string
+  /** Unix ms. */
+  at: number
+  count: number
+  /** What the backup was taken before. */
+  reason: 'convert' | 'restore'
+}
+
 export type BackendMessage =
   | StatePayload
   | { type: 'image'; profileId: string; rev: number; dataUrl: string | null }
   | { type: 'worldBooks'; books: { id: string; name: string }[] }
   | { type: 'worldBookEntries'; bookId: string; entries: WorldBookEntryLite[] }
+  | { type: 'lorebookBackups'; backups: LorebookBackupSummary[] }
+  | { type: 'lorebookApplied'; bookId: string; written: number; skipped: string[] }
   | { type: 'notice'; level: 'info' | 'success' | 'warning' | 'error'; message: string }

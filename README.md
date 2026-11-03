@@ -107,6 +107,15 @@ Lumiverse fills that in when the entry is injected into the prompt, so entries s
 
 It is a chat variable rather than a global one because Lumiverse's prompt assembly reads `{{getgvar}}` values from the chat's own copy, which an extension cannot update.
 
+### Converting a lorebook
+
+Once places live on the map, the coordinates written into entries can point at it instead (Import tab > From a lorebook > pick the book > **Find coordinates**):
+
+- Every literal like `Shackle City (-20, 60)` or `Port:[20,-25]` is matched to a place: by a place named just before it (aliases in parentheses count), else by the entry's title when nothing else is named there, else by being the only place at those coordinates. Spans like `X[-45,0]` are left alone.
+- The preview shows each change in its line (old struck through, new below) with a checkbox. Name and title matches start ticked; position-only matches are marked "check it" and start unticked. A literal that matches no place can be added to the map as a new place.
+- **Apply** writes only the ticked changes, skips any entry edited since the preview, and turns on the lorebook variable if it was off. The original text of every changed entry is saved first; **Lorebook backups** lists them, and **Restore** (click twice) puts entries back. A restore is backed up too.
+- Converted entries still import: references are read back as the coordinates they stand for.
+
 ## Map layers (shapes)
 
 Draw the world itself in world coordinates, so the map conforms to your data instead of to a picture. Open the **Layers** tab.
@@ -115,7 +124,7 @@ Draw the world itself in world coordinates, so the map conforms to your data ins
 |---|---|
 | **Landmass** | Land outlines (with holes for lakes and inland seas), lakes, shorelines. The sea is drawn around the land. |
 | **Topography** | Contours with an elevation (coloured from lowland green to snowcap), spot heights |
-| **Terrain** | Forest, jungle, grassland, desert, snow, swamp, volcanic land, hills; mountain ranges, rivers, roads; volcanoes, peaks, oases |
+| **Terrain** | Broadleaf and conifer forest, jungle, grassland, desert, snow, swamp, volcanic land, hills; mountain and hill ranges, rivers, roads; volcanoes, peaks, oases |
 | **Props** | Cities, towns, castles, towers, ports, ruins, temples, crystals, camps, walls |
 
 - Each layer can be shown or hidden, locked, and faded. Click a layer to draw on it.
@@ -123,6 +132,7 @@ Draw the world itself in world coordinates, so the map conforms to your data ins
 - **Editing:** with **Select**, click a shape (Shift adds more), drag to move it, and use the handles to scale or stretch (Shift keeps proportions, Alt scales from the centre). Drag a vertex to move it, double-click an edge to add one, Alt+click or Delete removes one. **Cut a hole** draws a lake into a land shape.
 - **Select whole layer** picks every shape on a layer, so you can move and stretch an entire traced landmass onto your lorebook coordinates in one go.
 - **Import shapes…** takes a map file, a list of shapes, or a GeoJSON FeatureCollection (`properties.layer` and `properties.type`; x first). **Export GeoJSON** writes the same.
+- **Terrain symbols:** forests, jungle and conifer forest fill with trees, hills with mounds, grassland with tufts, desert with dunes and swamps with reeds. Mountain ranges draw as shaded peaks along the line and hill ranges as mounds. A selected shape's **Density** (Sparse to Very dense) packs symbols tighter or looser and **Symbol size** scales them. Symbols stay put while panning and thin out when zoomed far out.
 - Hovering shows what the layers say is there, e.g. "Land · Forest" or "Sea".
 
 ## The window

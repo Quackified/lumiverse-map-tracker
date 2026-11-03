@@ -1,4 +1,4 @@
-import type { ChatMessageDTO, LlmMessageDTO } from 'lumiverse-spindle-types'
+import type { ChatMessageDTO, LlmMessageDTO, WorldBookEntryDTO } from 'lumiverse-spindle-types'
 import { boundsOf, buildContext, calibrationForBounds, findPosTag, normalizeCalib } from './shared/geo'
 import { newProfile, slug } from './shared/parser'
 import { VAR_NAME_RE, placesVarValue } from './shared/places'
@@ -8,6 +8,7 @@ import {
   type ChatMapState,
   type Destination,
   type FrontendMessage,
+  type LorebookBackupSummary,
   type ProfileSummary,
   type Settings,
   type TrailPoint,
@@ -438,15 +439,113 @@ async function handle(msg: FrontendMessage, userId?: string): Promise<void> {
     }
     case 'listWorldBookEntries': {
       if (!spindle.permissions.has('world_books')) return
-      const { data } = await spindle.world_books.entries.list(msg.bookId, { limit: 2000, userId })
-      const looksLikeCoords = /\[\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\]|[XY]\s*\[\s*-?\d/
-      const entries = data
-        .filter((e) => e.extensions?.map || looksLikeCoords.test(e.content))
-        .map((e) => ({ id: e.id, name: e.comment || e.key.join(', ') || e.id, content: e.content, ...(e.extensions?.map ? { map: e.extensions.map } : {}) }))
-      return send({ type: 'worldBookEntries', bookId: msg.bookId, entries }, userId)
+      return sendEntries(msg.bookId, userId)
+    }
+    case 'applyLorebookRefs': {
+      if (!spindle.permissions.has('world_books')) return
+      const originals: { id: string; name: string; content: string }[] = []
+      const skipped: string[] = []
+      const todo: { id: string; after: string }[] = []
+      for (const c of msg.changes) {
+        const entry = await spindle.world_books.entries.get(c.id, userId)
+        if (!entry || entry.content !== c.before) {
+          skipped.push(c.name)
+          continue
+        }
+        originals.push({ id: c.id, name: c.name, content: entry.content })
+        todo.push({ id: c.id, after: c.after })
+      }
+      // The backup is written before any entry changes.
+      if (originals.length) await saveBackup(msg.bookId, msg.bookName, originals, 'convert', userId)
+      let written = 0
+      for (const t of todo) {
+        try {
+          await spindle.world_books.entries.update(t.id, { content: t.after }, userId)
+          written++
+        } catch (err) {
+          skipped.push(originals.find((o) => o.id === t.id)?.name ?? t.id)
+          spindle.log.warn(`[Map Tracker] Could not update entry ${t.id}: ${String(err)}`)
+        }
+      }
+      send({ type: 'lorebookApplied', bookId: msg.bookId, written, skipped }, userId)
+      notice(skipped.length ? 'warning' : 'success', `Updated ${written} ${written === 1 ? 'entry' : 'entries'}${skipped.length ? `; skipped ${skipped.length} (changed since the preview)` : ''}. Originals saved.`, userId)
+      await sendBackups(userId)
+      await sendEntries(msg.bookId, userId)
+      break
+    }
+    case 'listLorebookBackups':
+      return sendBackups(userId)
+    case 'restoreLorebookBackup': {
+      if (!spindle.permissions.has('world_books')) return
+      const backup = await readJson<LorebookBackup | null>(backupPath(msg.backupId), null, userId)
+      if (!backup) return notice('error', 'That backup no longer exists.', userId)
+      const current: LorebookBackup['entries'] = []
+      for (const e of backup.entries) {
+        const entry = await spindle.world_books.entries.get(e.id, userId)
+        if (entry) current.push({ id: e.id, name: e.name, content: entry.content })
+      }
+      // Restoring is undoable too: keep what it replaces.
+      if (current.length) await saveBackup(backup.bookId, backup.bookName, current, 'restore', userId)
+      let restored = 0
+      for (const e of backup.entries) {
+        if (!current.some((c) => c.id === e.id)) continue
+        await spindle.world_books.entries.update(e.id, { content: e.content }, userId)
+        restored++
+      }
+      const missing = backup.entries.length - restored
+      notice(missing ? 'warning' : 'success', `Restored ${restored} ${restored === 1 ? 'entry' : 'entries'}${missing ? `; ${missing} no longer exist` : ''}.`, userId)
+      await sendBackups(userId)
+      await sendEntries(backup.bookId, userId)
+      break
     }
   }
   await sendState(userId)
+}
+
+// ── Lorebook entries and backups ─────────────────────────────────────────────
+
+/** Every entry in a world book; the host returns at most 200 per call. */
+async function listAllEntries(bookId: string, userId?: string): Promise<WorldBookEntryDTO[]> {
+  const out: WorldBookEntryDTO[] = []
+  for (let offset = 0; offset < 20000; offset += 200) {
+    const { data, total } = await spindle.world_books.entries.list(bookId, { limit: 200, offset, userId })
+    out.push(...data)
+    if (!data.length || out.length >= total) break
+  }
+  return out
+}
+
+/** Points "[x,y]" / "(x, y)", spans "X[a,b]", or map references. */
+const LOOKS_LIKE_COORDS = /\[\s*[-−]?\d+(?:\.\d+)?\s*,\s*[-−]?\d+(?:\.\d+)?\s*\]|\(\s*[-−]?\d+(?:\.\d+)?\s*,\s*[-−]?\d+(?:\.\d+)?\s*\)|[XY]\s*\[\s*[-−]?\d|\{\{\s*get(?:chat|g)varkey::/
+
+async function sendEntries(bookId: string, userId?: string): Promise<void> {
+  const data = await listAllEntries(bookId, userId)
+  const entries = data
+    .filter((e) => e.extensions?.map || LOOKS_LIKE_COORDS.test(e.content))
+    .map((e) => ({ id: e.id, name: e.comment || e.key.join(', ') || e.id, content: e.content, ...(e.extensions?.map ? { map: e.extensions.map } : {}) }))
+  send({ type: 'worldBookEntries', bookId, entries }, userId)
+}
+
+interface LorebookBackup extends Omit<LorebookBackupSummary, 'count'> {
+  entries: { id: string; name: string; content: string }[]
+}
+
+const BACKUP_INDEX = 'lorebook-backups.json'
+const BACKUP_LIMIT = 30
+const backupPath = (id: string) => `lorebook-backups/${id.replace(/[^a-z0-9-]/gi, '')}.json`
+
+async function saveBackup(bookId: string, bookName: string, entries: LorebookBackup['entries'], reason: LorebookBackup['reason'], userId?: string): Promise<void> {
+  const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+  const backup: LorebookBackup = { id, bookId, bookName, at: Date.now(), reason, entries }
+  await writeJson(backupPath(id), backup, userId)
+  const index = await readJson<LorebookBackupSummary[]>(BACKUP_INDEX, [], userId)
+  index.unshift({ id, bookId, bookName, at: backup.at, count: entries.length, reason })
+  for (const old of index.splice(BACKUP_LIMIT)) await spindle.userStorage.delete(backupPath(old.id), userId).catch(() => {})
+  await writeJson(BACKUP_INDEX, index, userId)
+}
+
+async function sendBackups(userId?: string): Promise<void> {
+  send({ type: 'lorebookBackups', backups: await readJson<LorebookBackupSummary[]>(BACKUP_INDEX, [], userId) }, userId)
 }
 
 spindle.onFrontendMessage((payload, userId) => {

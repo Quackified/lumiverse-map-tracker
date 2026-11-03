@@ -8,6 +8,7 @@ import {
   simplify,
 } from '../shared/features'
 import type { Bounds, Feature, FeatureGeom, FeatureLayer, LayerSettings, Ring, WorldProfile } from '../shared/types'
+import { hasSymbols, hash01, hashString, hill, paintArea } from './terrain'
 
 // Renders the vector layers and edits them: select, move, scale/stretch with
 // handles, drag/insert/delete vertices, and draw new areas, lines and spots.
@@ -48,6 +49,7 @@ const AREA_FILL: Record<string, string> = {
   lake: WATER,
   contour: '#a08a5c',
   forest: '#3f7a3e',
+  pine: '#2f5e3a',
   jungle: '#2c6a46',
   grassland: '#9fbf6a',
   desert: '#e3c27a',
@@ -59,25 +61,12 @@ const AREA_FILL: Record<string, string> = {
 const AREA_STROKE: Record<string, string> = { land: '#5b4a2c', lake: '#2f5b6e', contour: '#7a5d3a' }
 const LINE_STYLE: Record<string, { color: string; width: number; dash?: number[] }> = {
   mountains: { color: '#4a3b2a', width: 2.5 },
+  hills: { color: '#6b5636', width: 2 },
   river: { color: '#4f9ed8', width: 2.5 },
   road: { color: '#a07850', width: 1.6, dash: [6, 4] },
   coast: { color: '#3b2f1d', width: 1.6 },
   contour: { color: '#7a5d3a', width: 1.1 },
   wall: { color: '#8b8b8b', width: 3 },
-}
-
-function hashString(s: string): number {
-  let h = 2166136261
-  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619)
-  return h >>> 0
-}
-
-/** A stable pseudo-random number in [0, 1) for a seed and two integers. */
-function hash01(seed: number, a: number, b: number): number {
-  let h = Math.imul(seed ^ Math.imul(a, 0x9e3779b1), 0x85ebca6b) ^ Math.imul(b + 1, 0xc2b2ae35)
-  h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d)
-  h ^= h >>> 13
-  return (h >>> 0) / 4294967296
 }
 
 /** Elevation colour ramp: lowland green → highland brown → snowcap. */
@@ -184,7 +173,7 @@ export class VectorEditor {
         g.fillStyle = WATER
         g.fillRect(0, 0, w, h)
       }
-      for (const f of items) this.drawFeature(g, f, maxElev, c)
+      for (const f of items) this.drawFeature(g, f, maxElev, c, w, h)
       g.restore()
     }
     if (this.host.labels()) this.drawLabels(g, fs, c)
@@ -218,23 +207,28 @@ export class VectorEditor {
     }
   }
 
-  private drawFeature(g: CanvasRenderingContext2D, f: Feature, maxElev: number, c: Colors): void {
+  private drawFeature(g: CanvasRenderingContext2D, f: Feature, maxElev: number, c: Colors, viewW: number, viewH: number): void {
     const smooth = !!f.smooth
     if (f.geom === 'area') {
       g.beginPath()
       for (const r of f.rings) this.path(g, r, true, smooth)
       const fill = f.color ?? (f.layer === 'topography' ? elevationColor(f.elevation ?? 0, maxElev) : (AREA_FILL[f.type] ?? '#9a9a9a'))
       g.fillStyle = fill
-      const terrain = f.layer === 'terrain'
-      if (terrain) g.globalAlpha *= 0.75
+      // Areas with symbols get a lighter ground tint so the trees, hills or dunes carry them.
+      const symbols = hasSymbols(f)
+      const alpha = f.layer !== 'terrain' ? 1 : symbols ? 0.4 : 0.75
+      g.globalAlpha *= alpha
       g.fill('evenodd')
-      if (terrain) g.globalAlpha /= 0.75
-      g.strokeStyle = AREA_STROKE[f.type] ?? fill
-      g.lineWidth = f.layer === 'landmass' ? 1.6 : 1
-      g.stroke()
+      g.globalAlpha /= alpha
+      if (!symbols) {
+        g.strokeStyle = AREA_STROKE[f.type] ?? fill
+        g.lineWidth = f.layer === 'landmass' ? 1.6 : 1
+        g.stroke()
+      }
+      if (symbols) paintArea(g, f, this.host, viewW, viewH)
     } else if (f.geom === 'line') {
       const st = LINE_STYLE[f.type] ?? { color: f.color ?? c.text, width: 2 }
-      if (f.type === 'mountains') {
+      if (f.type === 'mountains' || f.type === 'hills') {
         this.mountainRange(g, f, f.color ?? st.color)
         return
       }
@@ -265,7 +259,8 @@ export class VectorEditor {
     if (ring.length < 2) return
     const k = this.host.scale()
     const size = f.size ?? 1
-    const base = 5.5 * size
+    const hills = f.type === 'hills'
+    const base = (hills ? 6.5 : 6.1) * size
     let step = base
     while (step * k < 9) step *= 2
     const w = step * k
@@ -312,7 +307,8 @@ export class VectorEditor {
     g.lineJoin = 'round'
     g.lineCap = 'round'
     g.lineWidth = Math.max(0.8, Math.min(2, w / 14))
-    for (const pk of peaks) this.peak(g, pk.x, pk.y, pk.h, pk.b, pk.lean, pk.h > w * 1.35, ink)
+    if (hills) peaks.forEach((pk, n) => hill(g, pk.x, pk.y, pk.b * 1.35, (salt) => hash01(seed, n, salt + 11)))
+    else for (const pk of peaks) this.peak(g, pk.x, pk.y, pk.h, pk.b, pk.lean, pk.h > w * 1.35, ink)
     g.restore()
   }
 

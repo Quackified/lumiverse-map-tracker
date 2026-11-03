@@ -38,7 +38,8 @@ export const FEATURE_TYPES: Record<FeatureLayer, FeatureType[]> = {
     { type: 'peak', label: 'Peak / spot height', geom: 'spot' },
   ],
   terrain: [
-    { type: 'forest', label: 'Forest', geom: 'area' },
+    { type: 'forest', label: 'Forest (broadleaf)', geom: 'area' },
+    { type: 'pine', label: 'Forest (conifer)', geom: 'area' },
     { type: 'jungle', label: 'Jungle', geom: 'area' },
     { type: 'grassland', label: 'Grassland', geom: 'area' },
     { type: 'desert', label: 'Desert', geom: 'area' },
@@ -47,6 +48,7 @@ export const FEATURE_TYPES: Record<FeatureLayer, FeatureType[]> = {
     { type: 'volcanic', label: 'Volcanic land', geom: 'area' },
     { type: 'hills', label: 'Hills', geom: 'area' },
     { type: 'mountains', label: 'Mountain range', geom: 'line' },
+    { type: 'hills', label: 'Hill range', geom: 'line' },
     { type: 'river', label: 'River', geom: 'line' },
     { type: 'road', label: 'Road', geom: 'line' },
     { type: 'volcano', label: 'Volcano', geom: 'spot' },
@@ -160,7 +162,7 @@ export function cleanFeature(raw: unknown): Feature | null {
   if (!rings.length) return null
   const out: Feature = { id: typeof f.id === 'string' && f.id ? f.id : newFeatureId(layer), layer, geom, type: typeof f.type === 'string' && f.type ? f.type : FEATURE_TYPES[layer].find((t) => t.geom === geom)?.type ?? geom, rings }
   for (const k of ['name', 'note', 'color'] as const) if (typeof f[k] === 'string' && f[k]) out[k] = f[k] as string
-  for (const k of ['elevation', 'size'] as const) if (typeof f[k] === 'number' && Number.isFinite(f[k])) out[k] = f[k] as number
+  for (const k of ['elevation', 'size', 'density'] as const) if (typeof f[k] === 'number' && Number.isFinite(f[k])) out[k] = f[k] as number
   if (f.smooth) out.smooth = true
   if (f.hidden) out.hidden = true
   return out

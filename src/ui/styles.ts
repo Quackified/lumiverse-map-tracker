@@ -197,6 +197,12 @@ textarea.mt-input { height: auto; padding: 6px 8px; resize: vertical; width: 100
 .mt-item-name { padding: 3px 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mt-dot { width: 9px; height: 9px; border-radius: 50%; }
 .mt-swatch { width: 11px; height: 11px; border: 2px dashed; border-radius: 2px; }
+.mt-layers-list { display: flex; flex-direction: column; gap: 4px; }
+.mt-layer { display: flex; align-items: center; gap: 4px; padding: 4px 6px; border: 1px solid var(--mt-border); border-radius: 8px; cursor: pointer; background: var(--mt-fill-subtle); }
+.mt-layer.mt-on { border-color: var(--mt-primary); box-shadow: inset 0 0 0 1px var(--mt-primary); }
+.mt-layer-name { flex: 1; font-weight: 600; }
+.mt-layer-opacity { width: 70px; }
+.mt-icon-btn.mt-off { opacity: 0.45; }
 .mt-pin { margin: 8px 0; padding: 8px; border: 1px solid var(--mt-border); border-radius: 8px; background: var(--mt-fill-subtle); }
 .mt-pin.mt-on { border-color: var(--mt-primary); box-shadow: inset 0 0 0 1px var(--mt-primary); }
 .mt-pin-head { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; }

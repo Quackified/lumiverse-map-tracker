@@ -93,6 +93,40 @@ export interface MapImageMeta {
   rev: number
 }
 
+// ── Vector layers ───────────────────────────────────────────────────────────
+// Drawn in world coordinates so the map conforms to your data, not to a picture.
+
+export type FeatureLayer = 'landmass' | 'topography' | 'terrain' | 'props'
+export type FeatureGeom = 'area' | 'line' | 'spot'
+/** [x, y] world coordinates (GeoJSON order). */
+export type Ring = [number, number][]
+
+export interface Feature {
+  id: string
+  layer: FeatureLayer
+  geom: FeatureGeom
+  /** forest, river, volcano, castle… (see FEATURE_TYPES). */
+  type: string
+  /** area: outer ring then holes; line: one path; spot: one point. */
+  rings: Ring[]
+  name?: string
+  note?: string
+  /** Draw with rounded curves through the vertices. */
+  smooth?: boolean
+  /** Topography: height of this contour. */
+  elevation?: number
+  /** Spot symbol size multiplier. */
+  size?: number
+  color?: string
+  hidden?: boolean
+}
+
+export interface LayerSettings {
+  visible: boolean
+  locked: boolean
+  opacity: number
+}
+
 export interface WorldProfile {
   id: string
   name: string
@@ -100,6 +134,9 @@ export interface WorldProfile {
   bounds: Bounds
   points: Poi[]
   zones: Zone[]
+  /** Landmass, topography, terrain and prop shapes. */
+  features?: Feature[]
+  layerSettings?: Partial<Record<FeatureLayer, LayerSettings>>
   image?: MapImageMeta
   /** Crop/calibration from an imported map file, applied when an image of the same size is uploaded. */
   imageTemplate?: MapImageMeta

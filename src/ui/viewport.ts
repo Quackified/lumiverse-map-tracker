@@ -1,7 +1,8 @@
+import { areasAt, layerSettings, typeLabel } from '../shared/features'
 import {
   bearing,
-  calibMaps,
   compass,
+  rectCalibration,
   distanceUnits,
   formatCoord,
   formatKm,
@@ -11,11 +12,11 @@ import {
   worldToImage,
   zoneRect,
 } from '../shared/geo'
-import type { Bounds, Calibration, ChatMapState, MapImageMeta, Poi, Rect, WorldProfile, Zone } from '../shared/types'
+import type { Bounds, Calibration, ChatMapState, Feature, MapImageMeta, Poi, Rect, WorldProfile, Zone } from '../shared/types'
 import { clear, h, hueOf } from './dom'
+import { VectorEditor, isVectorTool, type VectorTool } from './vector'
 
-export type Tool = 'pan' | 'me' | 'dest' | 'add' | 'measure' | 'crop' | 'zone' | 'calib'
-export type PinKey = 'a' | 'b'
+export type Tool = 'pan' | 'me' | 'dest' | 'add' | 'measure' | 'crop' | 'zone' | 'imgxf' | VectorTool
 type CropMode = 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
 
 const CROP_CURSOR: Record<CropMode, string> = {
@@ -55,10 +56,12 @@ export interface MapHooks {
   onPick(tool: Tool, x: number, y: number): void
   /** Finished dragging a rectangle with the zone tool (world coords). */
   onRect(tool: Tool, r: Bounds): void
-  /** Crop handles or calibration pins moved. `move` while dragging, `end` once settled. */
+  /** Crop or image transform handles moved. `move` while dragging, `end` once settled. */
   onImageEdit(patch: Partial<Pick<MapImageMeta, 'crop' | 'calib'>>, phase: 'move' | 'end'): void
-  /** A calibration pin was grabbed or clicked. */
-  onActivePin(pin: PinKey): void
+  /** Vector layers edited: the whole new feature list. */
+  onFeaturesEdit(next: Feature[], phase: 'move' | 'end'): void
+  onFeatureSelection(ids: string[]): void
+  warn(message: string): void
   onSelectPoi(poi: Poi | null): void
   onContextMenu(x: number, y: number, poi: Poi | null, clientX: number, clientY: number): void
   onToolDone(): void
@@ -123,24 +126,22 @@ export class MapView {
   private dragRect: { a: { x: number; y: number }; b: { x: number; y: number } } | null = null
   private pointers = new Map<number, { x: number; y: number }>()
   private gesture: {
-    mode: 'pan' | 'rect' | 'pinch' | 'pin' | 'slide' | 'crop'
+    mode: 'pan' | 'rect' | 'pinch' | 'crop' | 'imgxf' | 'vector'
     sx: number
     sy: number
     moved: boolean
     view: View
     dist: number
     mid: { x: number; y: number }
-    pin?: PinKey
     crop?: CropMode
     startCrop?: Rect
-    startCalib?: Calibration
     startImg?: { px: number; py: number }
+    startRect?: Bounds
+    startWorld?: { x: number; y: number }
   } | null = null
-  /** Calibration pin that a plain click on the image moves. */
-  activePin: PinKey = 'a'
-  /** While calibrating, the image stays put on screen and the coordinate overlay moves instead. */
-  private frozen: Calibration | null = null
-  private wheelEnd: ReturnType<typeof setTimeout> | null = null
+  /** Space held: drag pans whatever the tool. */
+  private spaceDown = false
+  readonly vec: VectorEditor
   private raf = 0
   private theme: Theme | null = null
   private ro: ResizeObserver
@@ -160,6 +161,18 @@ export class MapView {
     this.gx = rulerX.getContext('2d')!
     this.gy = rulerY.getContext('2d')!
 
+    this.vec = new VectorEditor({
+      profile: () => this.profile,
+      toScreen: (x, y) => this.toScreen(x, y),
+      toWorld: (sx, sy) => this.toWorld(sx, sy),
+      scale: () => this.view.s,
+      settings: (l) => layerSettings(this.profile?.layerSettings, l),
+      labels: () => this.layers.labels,
+      invalidate: () => this.invalidate(),
+      emit: (next, phase) => this.hooks.onFeaturesEdit(next, phase),
+      onSelection: (ids) => this.hooks.onFeatureSelection(ids),
+      warn: (m) => this.hooks.warn(m),
+    })
     this.ro = new ResizeObserver(() => this.resize())
     this.ro.observe(this.el)
     this.bind()
@@ -179,10 +192,9 @@ export class MapView {
       this.hasView = false
       this.image = null
       this.measure = null
-      this.frozen = null
+      this.vec.cancel()
+      this.vec.setSelection([])
     }
-    if (this.tool === 'calib' && !this.frozen && p?.image) this.frozen = structuredClone(p.image.calib)
-    if (!p?.image) this.frozen = null
     if (!this.hasView) this.fit()
     this.invalidate()
   }
@@ -198,24 +210,12 @@ export class MapView {
   }
 
   setTool(t: Tool): void {
-    if (t !== 'calib' && this.frozen) this.unfreeze()
+    if (t !== this.tool) this.vec.cancel()
     this.tool = t
     this.measure = t === 'measure' ? this.measure : null
     this.dragRect = null
     this.el.dataset.tool = t
-    if (t === 'calib' && this.profile?.image) this.frozen = structuredClone(this.profile.image.calib)
     this.invalidate()
-  }
-
-  /** Leave image-locked mode without the image jumping on screen. */
-  private unfreeze(): void {
-    const live = this.profile?.image?.calib
-    const f = this.frozen
-    this.frozen = null
-    if (!live || !f) return
-    const c = this.undisp(this.view.cx, this.view.cy, f, live)
-    const k = Math.abs(calibMaps(f).mx.a / calibMaps(live).mx.a)
-    this.view = { cx: c.x, cy: c.y, s: Math.max(MIN_S, Math.min(MAX_S, this.view.s * (Number.isFinite(k) ? k : 1))) }
   }
 
   setTheme(): void {
@@ -225,7 +225,7 @@ export class MapView {
 
   fit(): void {
     if (!this.profile || !this.w || !this.hgt) return
-    const b = this.imageVisible() ? this.imageViewRect(this.tool === 'crop' || this.tool === 'calib')! : this.profile.bounds
+    const b = this.imageVisible() ? this.imageViewRect(this.tool === 'crop')! : this.profile.bounds
     const s = Math.min(this.w / (b.maxX - b.minX), this.hgt / (b.maxY - b.minY)) * 0.96
     this.view = { cx: (b.minX + b.maxX) / 2, cy: (b.minY + b.maxY) / 2, s: Math.max(MIN_S, Math.min(MAX_S, s)) }
     this.hasView = true
@@ -242,9 +242,8 @@ export class MapView {
   }
 
   centerOn(x: number, y: number, minScale?: number): void {
-    const v = this.disp(x, y)
-    this.view.cx = v.x
-    this.view.cy = v.y
+    this.view.cx = x
+    this.view.cy = y
     if (minScale && this.view.s < minScale) this.view.s = minScale
     this.invalidate()
   }
@@ -265,50 +264,28 @@ export class MapView {
 
   // ── Coordinates ───────────────────────────────────────────────────────────
 
-  // The view works in "view units". Normally they are world units. While
-  // calibrating they are the frozen calibration's world units, so the image
-  // holds still and world-space drawing goes through disp()/undisp().
-
-  /** View units → screen pixels. */
+  /** World → screen pixels. */
   private vScreen(x: number, y: number): { x: number; y: number } {
     const v = this.view
     return { x: (x - v.cx) * v.s + this.w / 2, y: this.hgt / 2 - (y - v.cy) * v.s }
   }
 
-  /** Screen pixels → view units. */
+  /** Screen pixels → world. */
   private sView(sx: number, sy: number): { x: number; y: number } {
     const v = this.view
     return { x: (sx - this.w / 2) / v.s + v.cx, y: v.cy - (sy - this.hgt / 2) / v.s }
   }
 
-  /** World → view units. */
-  private disp(x: number, y: number): { x: number; y: number } {
-    const live = this.profile?.image?.calib
-    if (!this.frozen || !live) return { x, y }
-    const p = worldToImage(live, x, y)
-    return imageToWorld(this.frozen, p.px, p.py)
-  }
-
-  /** View units → world. */
-  private undisp(x: number, y: number, f = this.frozen, live = this.profile?.image?.calib): { x: number; y: number } {
-    if (!f || !live) return { x, y }
-    const p = worldToImage(f, x, y)
-    return imageToWorld(live, p.px, p.py)
-  }
-
   toScreen(x: number, y: number): { x: number; y: number } {
-    const v = this.disp(x, y)
-    return this.vScreen(v.x, v.y)
+    return this.vScreen(x, y)
   }
 
   toWorld(sx: number, sy: number): { x: number; y: number } {
-    const v = this.sView(sx, sy)
-    return this.undisp(v.x, v.y)
+    return this.sView(sx, sy)
   }
 
-  /** Calibration the image is drawn with (frozen while calibrating). */
   private drawCalib(): Calibration | null {
-    return this.frozen ?? this.profile?.image?.calib ?? null
+    return this.profile?.image?.calib ?? null
   }
 
   imgToScreen(px: number, py: number): { x: number; y: number } {
@@ -322,7 +299,7 @@ export class MapView {
   }
 
   private editingImage(): boolean {
-    return (this.tool === 'crop' || this.tool === 'calib') && !!this.image && !!this.profile?.image
+    return (this.tool === 'crop' || this.tool === 'imgxf') && !!this.image && !!this.profile?.image
   }
 
   private imageVisible(): boolean {
@@ -346,7 +323,7 @@ export class MapView {
     return meta ? worldToImage(meta.calib, x, y) : null
   }
 
-  // ── Image editing (crop handles, calibration pins) ────────────────────────
+  // ── Image editing (crop handles, free transform) ──────────────────────────
 
   private cropHandles(): { mode: CropMode; x: number; y: number }[] {
     const c = this.profile!.image!.crop
@@ -370,8 +347,9 @@ export class MapView {
     ]
   }
 
+  /** Crop / transform handle (or inside the box) under a screen point. */
   private cropHit(sx: number, sy: number): CropMode | null {
-    if (!this.editingImage() || this.tool !== 'crop') return null
+    if (!this.editingImage()) return null
     for (const hd of this.cropHandles()) if (Math.hypot(hd.x - sx, hd.y - sy) <= 11) return hd.mode
     const c = this.profile!.image!.crop
     const p = this.screenToImg(sx, sy)
@@ -405,23 +383,37 @@ export class MapView {
     return { x: rx, y: ry, w: Math.round(x2) - rx, h: Math.round(y2) - ry }
   }
 
-  private pinHit(sx: number, sy: number): PinKey | null {
-    if (!this.editingImage() || this.tool !== 'calib') return null
-    const c = this.profile!.image!.calib
-    let best: PinKey | null = null
-    let bestD = 14
-    for (const k of ['a', 'b'] as const) {
-      const s = this.imgToScreen(c[k].px, c[k].py)
-      const d = Math.hypot(s.x - sx, s.y - sy)
-      if (d < bestD) (bestD = d), (best = k)
+  /**
+   * Free transform: drag the image's box in world space. Corners scale (Shift
+   * keeps the aspect ratio), edges stretch one axis, inside moves. The result is
+   * stored as two pins on the crop corners, so X and Y can scale independently.
+   */
+  private dragXf(mode: CropMode, start: Bounds, w0: { x: number; y: number }, w: { x: number; y: number }, keepAspect: boolean): Calibration {
+    const dx = w.x - w0.x
+    const dy = w.y - w0.y
+    let { minX, maxX, minY, maxY } = start
+    const MIN = (start.maxX - start.minX) * 0.02 || 1
+    if (mode === 'move') {
+      minX += dx
+      maxX += dx
+      minY += dy
+      maxY += dy
+    } else {
+      if (mode.includes('w')) minX = Math.min(start.minX + dx, maxX - MIN)
+      if (mode.includes('e')) maxX = Math.max(start.maxX + dx, minX + MIN)
+      if (mode.includes('n')) maxY = Math.max(start.maxY + dy, minY + MIN)
+      if (mode.includes('s')) minY = Math.min(start.minY + dy, maxY - MIN)
+      if (keepAspect && mode.length === 2) {
+        const k = Math.max((maxX - minX) / (start.maxX - start.minX), (maxY - minY) / (start.maxY - start.minY))
+        const nw = (start.maxX - start.minX) * k
+        const nh = (start.maxY - start.minY) * k
+        if (mode.includes('w')) minX = maxX - nw
+        else maxX = minX + nw
+        if (mode.includes('n')) maxY = minY + nh
+        else minY = maxY - nh
+      }
     }
-    return best
-  }
-
-  private movePin(k: PinKey, px: number, py: number, phase: 'move' | 'end'): void {
-    const c = structuredClone(this.profile!.image!.calib)
-    c[k] = { ...c[k], px: Math.round(px * 10) / 10, py: Math.round(py * 10) / 10 }
-    this.hooks.onImageEdit({ calib: c }, phase)
+    return rectCalibration(this.profile!.image!.crop, { minX, maxX, minY, maxY })
   }
 
   // ── Interaction ───────────────────────────────────────────────────────────
@@ -450,7 +442,9 @@ export class MapView {
   private bind(): void {
     const el = this.el
     el.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0 && e.pointerType === 'mouse') return
+      const middle = e.button === 1 && e.pointerType === 'mouse'
+      if (e.button !== 0 && !middle && e.pointerType === 'mouse') return
+      if (middle) e.preventDefault()
       el.focus({ preventScroll: true })
       el.setPointerCapture(e.pointerId)
       const p = this.local(e)
@@ -470,22 +464,21 @@ export class MapView {
         return
       }
       const base = { sx: p.x, sy: p.y, moved: false, view: { ...this.view }, dist: 0, mid: p }
+      if (middle || this.spaceDown) {
+        this.gesture = { ...base, mode: 'pan' }
+        return
+      }
       const meta = this.profile?.image
       const crop = this.cropHit(p.x, p.y)
       if (crop && meta) {
-        this.gesture = { ...base, mode: 'crop', crop, startCrop: { ...meta.crop }, startImg: this.screenToImg(p.x, p.y) }
+        this.gesture =
+          this.tool === 'imgxf'
+            ? { ...base, mode: 'imgxf', crop, startRect: this.imageViewRect(false)!, startWorld: this.toWorld(p.x, p.y) }
+            : { ...base, mode: 'crop', crop, startCrop: { ...meta.crop }, startImg: this.screenToImg(p.x, p.y) }
         return
       }
-      const pin = this.pinHit(p.x, p.y)
-      if (pin) {
-        this.activePin = pin
-        this.hooks.onActivePin(pin)
-        this.gesture = { ...base, mode: 'pin', pin }
-        this.el.style.cursor = 'grabbing'
-        return
-      }
-      if (this.tool === 'calib' && e.shiftKey && meta && this.editingImage()) {
-        this.gesture = { ...base, mode: 'slide', startCalib: structuredClone(meta.calib), startImg: this.screenToImg(p.x, p.y) }
+      if (isVectorTool(this.tool) && this.vec.pointerDown(this.tool, p.x, p.y, e)) {
+        this.gesture = { ...base, mode: 'vector' }
         return
       }
       const rectTool = this.tool === 'zone'
@@ -511,9 +504,14 @@ export class MapView {
         this.invalidate()
         return
       }
-      if (g && (g.mode === 'crop' || g.mode === 'pin' || g.mode === 'slide')) {
+      if (g && (g.mode === 'crop' || g.mode === 'imgxf')) {
         if (!g.moved && Math.hypot(p.x - g.sx, p.y - g.sy) > 2) g.moved = true
-        if (g.moved) this.editDrag(g, p.x, p.y, 'move')
+        if (g.moved) this.editDrag(g, p.x, p.y, 'move', e.shiftKey)
+        this.updateHover(p.x, p.y)
+        return
+      }
+      if (isVectorTool(this.tool) && (!g || g.mode === 'vector')) this.vec.pointerMove(this.tool, p.x, p.y, e)
+      if (g?.mode === 'vector') {
         this.updateHover(p.x, p.y)
         return
       }
@@ -539,8 +537,13 @@ export class MapView {
       this.gesture = null
       if (!g) return
       const p = this.local(e)
-      if (g.mode === 'crop' || g.mode === 'pin' || g.mode === 'slide') {
-        if (g.moved) this.editDrag(g, p.x, p.y, 'end')
+      if (g.mode === 'crop' || g.mode === 'imgxf') {
+        if (g.moved) this.editDrag(g, p.x, p.y, 'end', e.shiftKey)
+        this.updateHover(p.x, p.y)
+        return
+      }
+      if (g.mode === 'vector') {
+        this.vec.pointerUp(this.tool, p.x, p.y)
         this.updateHover(p.x, p.y)
         return
       }
@@ -577,25 +580,6 @@ export class MapView {
         e.preventDefault()
         const p = this.local(e)
         const dy = (e.deltaMode === 1 ? 16 : 1) * (e.deltaY || e.deltaX)
-        const meta = this.profile?.image
-        if (this.tool === 'calib' && e.shiftKey && meta && this.editingImage()) {
-          // Scale the coordinate overlay about the cursor (pins spread apart or together).
-          const k = Math.pow(1.0012, -dy)
-          const c0 = this.screenToImg(p.x, p.y)
-          const c = structuredClone(meta.calib)
-          for (const pin of [c.a, c.b]) {
-            pin.px = Math.round((c0.px + (pin.px - c0.px) * k) * 10) / 10
-            pin.py = Math.round((c0.py + (pin.py - c0.py) * k) * 10) / 10
-          }
-          this.hooks.onImageEdit({ calib: c }, 'move')
-          if (this.wheelEnd) clearTimeout(this.wheelEnd)
-          this.wheelEnd = setTimeout(() => {
-            this.wheelEnd = null
-            const cur = this.profile?.image
-            if (cur) this.hooks.onImageEdit({ calib: cur.calib }, 'end')
-          }, 400)
-          return
-        }
         this.zoomBy(Math.pow(1.0015, -dy), p.x, p.y)
         this.updateHover(p.x, p.y)
       },
@@ -603,8 +587,12 @@ export class MapView {
     )
 
     el.addEventListener('dblclick', (e) => {
-      if (this.tool !== 'pan') return
       const p = this.local(e)
+      if (isVectorTool(this.tool)) {
+        this.vec.dblclick(this.tool, p.x, p.y)
+        return
+      }
+      if (this.tool !== 'pan') return
       this.zoomBy(2, p.x, p.y)
     })
 
@@ -615,7 +603,20 @@ export class MapView {
       this.hooks.onContextMenu(w.x, w.y, this.poiAt(p.x, p.y), e.clientX, e.clientY)
     })
 
+    el.addEventListener('keyup', (e) => {
+      if (e.key === ' ') this.spaceDown = false
+    })
+    el.addEventListener('blur', () => (this.spaceDown = false))
     el.addEventListener('keydown', (e) => {
+      if (e.key === ' ') {
+        this.spaceDown = true
+        e.preventDefault()
+        return
+      }
+      if (isVectorTool(this.tool) && this.vec.key(this.tool, e)) {
+        e.preventDefault()
+        return
+      }
       const step = 60 / this.view.s
       const k = e.key
       if (k === '+' || k === '=') this.zoomBy(1.25)
@@ -659,34 +660,19 @@ export class MapView {
       case 'add':
         this.hooks.onPick(this.tool, w.x, w.y)
         return
-      case 'calib': {
-        if (!this.editingImage()) return
-        // A click drops the active pin on that spot of the image.
-        const ip = this.screenToImg(sx, sy)
-        this.movePin(this.activePin, ip.px, ip.py, 'end')
+      case 'vspot':
+        this.vec.click(this.tool, sx, sy)
         return
-      }
     }
   }
 
-  private editDrag(g: NonNullable<MapView['gesture']>, sx: number, sy: number, phase: 'move' | 'end'): void {
+  private editDrag(g: NonNullable<MapView['gesture']>, sx: number, sy: number, phase: 'move' | 'end', shift: boolean): void {
     const meta = this.profile?.image
     if (!meta) return
-    const ip = this.screenToImg(sx, sy)
     if (g.mode === 'crop' && g.crop && g.startCrop && g.startImg) {
-      this.hooks.onImageEdit({ crop: this.dragCrop(g.crop, g.startCrop, g.startImg, ip) }, phase)
-    } else if (g.mode === 'pin' && g.pin) {
-      this.movePin(g.pin, ip.px, ip.py, phase)
-    } else if (g.mode === 'slide' && g.startCalib && g.startImg) {
-      // Slide the whole coordinate overlay: both pins move by the drag offset.
-      const dx = ip.px - g.startImg.px
-      const dy = ip.py - g.startImg.py
-      const c = structuredClone(g.startCalib)
-      for (const pin of [c.a, c.b]) {
-        pin.px = Math.round((pin.px + dx) * 10) / 10
-        pin.py = Math.round((pin.py + dy) * 10) / 10
-      }
-      this.hooks.onImageEdit({ calib: c }, phase)
+      this.hooks.onImageEdit({ crop: this.dragCrop(g.crop, g.startCrop, g.startImg, this.screenToImg(sx, sy)) }, phase)
+    } else if (g.mode === 'imgxf' && g.crop && g.startRect && g.startWorld) {
+      this.hooks.onImageEdit({ calib: this.dragXf(g.crop, g.startRect, g.startWorld, this.toWorld(sx, sy), shift) }, phase)
     }
   }
 
@@ -695,19 +681,9 @@ export class MapView {
     this.hover = { x: w.x, y: w.y, sx, sy }
     this.hoverPoi = this.poiAt(sx, sy)
     const g = this.gesture
-    const crop = g?.mode === 'crop' ? g.crop! : g ? null : this.cropHit(sx, sy)
-    const pin = g?.mode === 'pin' ? g.pin! : g ? null : this.pinHit(sx, sy)
-    this.el.style.cursor = crop
-      ? CROP_CURSOR[crop]
-      : pin
-        ? g
-          ? 'grabbing'
-          : 'grab'
-        : g?.mode === 'slide'
-          ? 'move'
-          : this.hoverPoi && this.tool === 'pan'
-            ? 'pointer'
-            : ''
+    const crop = g?.mode === 'crop' || g?.mode === 'imgxf' ? g.crop! : g ? null : this.cropHit(sx, sy)
+    const vcur = isVectorTool(this.tool) ? this.vec.cursorFor(this.tool, sx, sy) : null
+    this.el.style.cursor = this.spaceDown || g?.mode === 'pan' ? (g?.moved ? 'grabbing' : 'grab') : crop ? CROP_CURSOR[crop] : (vcur ?? (this.hoverPoi && this.tool === 'pan' ? 'pointer' : ''))
     this.renderReadout()
     this.invalidate()
   }
@@ -737,6 +713,17 @@ export class MapView {
     const place = [where.zone?.name, where.region?.name].filter(Boolean).join(' · ')
     if (place) r.append(h('div', null, place))
     if (where.zones.length > 1) r.append(h('div', { class: 'mt-ro-dim' }, `also ${where.zones.slice(1).map((z) => z.name).join(', ')}`))
+    // What the vector layers say is here: "Land · Forest", or "Sea".
+    const fs = p.features ?? []
+    if (fs.length) {
+      const areas = areasAt(fs, x, y, (l) => layerSettings(p.layerSettings, l).visible)
+      const hasLand = fs.some((f) => f.layer === 'landmass' && f.type === 'land' && f.geom === 'area')
+      const terrain = areas.filter((f) => f.layer !== 'landmass').map((f) => f.name ?? typeLabel(f.layer, f.type, f.geom))
+      const land = areas.find((f) => f.layer === 'landmass')
+      const ground = land ? (land.type === 'lake' ? (land.name ?? 'Lake') : (land.name ?? 'Land')) : hasLand ? 'Sea' : null
+      const text = [ground, ...terrain].filter(Boolean).join(' · ')
+      if (text) r.append(h('div', { class: 'mt-ro-dim' }, text))
+    }
     if (!poi) {
       const n = nearest(p, x, y, 1)[0]
       if (n) r.append(h('div', { class: 'mt-ro-dim' }, `Nearest: ${n.poi.name}, ${formatKm(n.km)} ${n.dir}`))
@@ -806,7 +793,13 @@ export class MapView {
     const step = niceStep(80 * unitPerPx)
     if (p) {
       const cropping = this.tool === 'crop' && this.editingImage()
-      if (this.imageVisible()) this.drawImage(cropping)
+      const editingImage = this.editingImage()
+      const colors = { bg: t.bg, text: t.text, primary: t.primary, accent: t.accent }
+      // The picture sits under the vector layers, except while it's being cropped
+      // or transformed, when it comes to the front so it can be lined up.
+      if (this.imageVisible() && !editingImage) this.drawImage(false)
+      this.vec.draw(this.g, this.w, this.hgt, colors)
+      if (this.imageVisible() && editingImage) this.drawImage(cropping)
       if (this.layers.grid) this.drawGrid(step, t)
       if (!cropping) {
         if (this.layers.regions) this.drawZones(p, 'region', t)
@@ -818,8 +811,8 @@ export class MapView {
         this.drawMarkers(t)
         this.drawDragRect(t)
       }
-      if (cropping) this.drawCropEditor(t)
-      if (this.tool === 'calib' && this.editingImage()) this.drawPins(t)
+      this.vec.drawOverlay(this.g, colors, this.tool)
+      if (editingImage) this.drawCropEditor(t, !cropping)
     }
     this.drawRulers(step, t)
   }
@@ -845,8 +838,12 @@ export class MapView {
     g.restore()
   }
 
-  /** Dimmed outside, a framed crop box with thirds, eight handles and its size. */
-  private drawCropEditor(t: Theme): void {
+  /**
+   * Crop: dimmed outside, a framed box with thirds, eight handles and its pixel
+   * size. Transform: the same box and handles around the placed image, sized in
+   * world units.
+   */
+  private drawCropEditor(t: Theme, transform = false): void {
     const meta = this.profile!.image!
     const full = this.screenRect(0, 0, meta.width, meta.height)
     const c = this.screenRect(meta.crop.x, meta.crop.y, meta.crop.w, meta.crop.h)
@@ -854,9 +851,11 @@ export class MapView {
     g.save()
     g.fillStyle = 'rgba(0,0,0,0.55)'
     g.beginPath()
-    g.rect(full.x, full.y, full.w, full.h)
-    g.rect(c.x, c.y, c.w, c.h)
-    g.fill('evenodd')
+    if (!transform) {
+      g.rect(full.x, full.y, full.w, full.h)
+      g.rect(c.x, c.y, c.w, c.h)
+      g.fill('evenodd')
+    }
     g.strokeStyle = 'rgba(255,255,255,0.35)'
     g.lineWidth = 1
     g.beginPath()
@@ -870,7 +869,7 @@ export class MapView {
     g.strokeStyle = '#fff'
     g.lineWidth = 1.5
     g.strokeRect(c.x, c.y, c.w, c.h)
-    const active = this.gesture?.mode === 'crop' ? this.gesture.crop : null
+    const active = this.gesture?.mode === 'crop' || this.gesture?.mode === 'imgxf' ? this.gesture.crop : null
     for (const hd of this.cropHandles()) {
       const corner = hd.mode.length === 2
       g.fillStyle = hd.mode === active ? t.primary : '#fff'
@@ -882,7 +881,8 @@ export class MapView {
       g.fill()
       g.stroke()
     }
-    const label = `${meta.crop.w} × ${meta.crop.h} px`
+    const wr = this.imageViewRect(false)!
+    const label = transform ? `${Math.round((wr.maxX - wr.minX) * 10) / 10} × ${Math.round((wr.maxY - wr.minY) * 10) / 10} units` : `${meta.crop.w} × ${meta.crop.h} px`
     g.font = '600 11px system-ui, sans-serif'
     const tw = g.measureText(label).width + 12
     const ly = c.y + c.h + 8 + 20 > this.hgt ? c.y + c.h - 28 : c.y + c.h + 8
@@ -894,56 +894,6 @@ export class MapView {
     g.textAlign = 'center'
     g.fillText(label, c.x + c.w / 2, ly + 14)
     g.restore()
-  }
-
-  /** Calibration pins: a ring + crosshair, labelled with the coordinate they pin. */
-  private drawPins(t: Theme): void {
-    const c = this.profile!.image!.calib
-    const g = this.g
-    const sa = this.imgToScreen(c.a.px, c.a.py)
-    const sb = this.imgToScreen(c.b.px, c.b.py)
-    g.save()
-    g.strokeStyle = t.text
-    g.globalAlpha = 0.5
-    g.setLineDash([4, 4])
-    g.beginPath()
-    g.moveTo(sa.x, sa.y)
-    g.lineTo(sb.x, sb.y)
-    g.stroke()
-    g.restore()
-    for (const k of ['a', 'b'] as const) {
-      const pin = c[k]
-      const s = k === 'a' ? sa : sb
-      const on = this.activePin === k
-      const color = k === 'a' ? t.primary : t.accent
-      g.save()
-      g.lineWidth = on ? 2.5 : 1.5
-      g.strokeStyle = '#fff'
-      g.beginPath()
-      g.arc(s.x, s.y, on ? 11 : 9, 0, Math.PI * 2)
-      g.fillStyle = color
-      g.globalAlpha = 0.28
-      g.fill()
-      g.globalAlpha = 1
-      g.strokeStyle = color
-      g.stroke()
-      g.beginPath()
-      g.moveTo(s.x - 16, s.y)
-      g.lineTo(s.x - 4, s.y)
-      g.moveTo(s.x + 4, s.y)
-      g.lineTo(s.x + 16, s.y)
-      g.moveTo(s.x, s.y - 16)
-      g.lineTo(s.x, s.y - 4)
-      g.moveTo(s.x, s.y + 4)
-      g.lineTo(s.x, s.y + 16)
-      g.lineWidth = 1.5
-      g.stroke()
-      g.font = `${on ? 700 : 600} 12px system-ui, sans-serif`
-      g.fillStyle = color
-      const name = k === 'a' ? 'A' : 'B'
-      this.haloText(`${name} ${formatCoord(pin.x, pin.y, 2)}`, s.x + 14, s.y - 12, t)
-      g.restore()
-    }
   }
 
   private drawGrid(step: number, t: Theme): void {
@@ -1290,3 +1240,4 @@ export class MapView {
     }
   }
 }
+

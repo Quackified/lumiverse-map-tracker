@@ -13,9 +13,11 @@ import {
   locate,
   nearest,
   normalizeCalib,
+  rectCalibration,
   worldToImage,
   zoneRect,
 } from '../src/shared/geo'
+import { areasAt, featuresFromJson, featuresToGeoJson, pointInRings, simplify } from '../src/shared/features'
 import { entriesFromLorebookJson, parseMapEntries } from '../src/shared/mapext'
 import { mergeInto, newProfile, parseCoordinateText, parseSpans } from '../src/shared/parser'
 import type { Calibration, LegacyCalibration, WorldProfile } from '../src/shared/types'
@@ -361,5 +363,74 @@ describe('map fields (extensions.map, Map Coordinate Format v1)', () => {
     expect(locate(p, -250, 170).zones.map((z) => z.name)).toEqual(['The Dark Domain', 'Storm Mountain'])
     expect(locate(p, 10, 160).zone?.name).toBe('Frostfall Tundra')
     expect(locate(p, -300, 160).zones.some((z) => z.name === 'Frostfall Tundra')).toBe(false)
+  })
+})
+
+describe('vector layers', () => {
+  const square: [number, number][] = [
+    [0, 0],
+    [10, 0],
+    [10, 10],
+    [0, 10],
+  ]
+  const hole: [number, number][] = [
+    [4, 4],
+    [6, 4],
+    [6, 6],
+    [4, 6],
+  ]
+
+  it('tests points against areas with holes', () => {
+    expect(pointInRings(2, 2, [square, hole])).toBe(true)
+    expect(pointInRings(5, 5, [square, hole])).toBe(false)
+    expect(pointInRings(12, 5, [square])).toBe(false)
+  })
+
+  it('simplifies a freehand stroke but keeps its corners', () => {
+    const stroke: [number, number][] = []
+    for (let i = 0; i <= 100; i++) stroke.push([i / 10, (i % 2) * 0.01])
+    for (let i = 1; i <= 100; i++) stroke.push([10, i / 10])
+    const s = simplify(stroke, 0.05)
+    expect(s.length).toBe(3)
+    expect(s[1]).toEqual([10, 0])
+  })
+
+  it('round-trips GeoJSON, x first, polygons closed', () => {
+    const fs = featuresFromJson([
+      { id: 'a', layer: 'landmass', geom: 'area', type: 'land', rings: [square, hole], smooth: true },
+      { id: 'r', layer: 'terrain', geom: 'line', type: 'river', rings: [[[0, 0], [5, 5]]] },
+      { id: 'v', layer: 'terrain', geom: 'spot', type: 'volcano', rings: [[[3, 4]]], name: 'Skyfire' },
+      { layer: 'nowhere', geom: 'area', rings: [square] },
+    ])!
+    expect(fs.length).toBe(3)
+    const gj = featuresToGeoJson(fs)
+    expect(gj.features[0].geometry).toEqual({ type: 'Polygon', coordinates: [[...square, square[0]], [...hole, hole[0]]] })
+    expect(gj.features[2].geometry).toEqual({ type: 'Point', coordinates: [3, 4] })
+    const back = featuresFromJson(gj)!
+    expect(back.map((f) => [f.id, f.layer, f.geom, f.type])).toEqual(fs.map((f) => [f.id, f.layer, f.geom, f.type]))
+    expect(back[0].rings).toEqual([square, hole])
+    expect(back[2].name).toBe('Skyfire')
+  })
+
+  it('names what lies under a point, top layer first', () => {
+    const fs = featuresFromJson([
+      { id: 'land', layer: 'landmass', geom: 'area', type: 'land', rings: [square] },
+      { id: 'wood', layer: 'terrain', geom: 'area', type: 'forest', rings: [hole] },
+    ])!
+    expect(areasAt(fs, 5, 5, () => true).map((f) => f.id)).toEqual(['wood', 'land'])
+    expect(areasAt(fs, 1, 1, () => true).map((f) => f.id)).toEqual(['land'])
+    expect(areasAt(fs, 5, 5, (l) => l !== 'terrain').map((f) => f.id)).toEqual(['land'])
+  })
+
+  it('places a cropped image over a world rectangle, stretching each axis on its own', () => {
+    const crop = { x: 100, y: 50, w: 800, h: 400 }
+    const c = rectCalibration(crop, { minX: -400, maxX: 100, minY: -100, maxY: 150 })
+    const tl = imageToWorld(c, 100, 50)
+    const br = imageToWorld(c, 900, 450)
+    expect([tl.x, tl.y, br.x, br.y]).toEqual([-400, 150, 100, -100])
+    // 500 units over 800 px across, 250 units over 400 px down: same ratio here, but independent.
+    const squashed = rectCalibration(crop, { minX: -400, maxX: 100, minY: 0, maxY: 150 })
+    expect(imageToWorld(squashed, 900, 450).y).toBeCloseTo(0, 9)
+    expect(imageToWorld(squashed, 900, 450).x).toBeCloseTo(100, 9)
   })
 })

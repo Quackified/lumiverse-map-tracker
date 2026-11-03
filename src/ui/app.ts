@@ -1,12 +1,16 @@
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types'
-import { bearing, boundsOf, calibMaps, calibrationForBounds, compass, distanceUnits, formatCoord, formatKm, imageToWorld, locate, normalizeCalib } from '../shared/geo'
+import { bearing, boundsOf, calibMaps, calibrationForBounds, compass, distanceUnits, formatCoord, formatKm, imageToWorld, locate, normalizeCalib, rectCalibration } from '../shared/geo'
+import { FEATURE_TYPES, LAYER_LABEL, LAYER_ORDER, featuresFromJson, featuresToGeoJson, layerSettings, newFeatureId } from '../shared/features'
 import { entriesFromLorebookJson, hasMapData, parseMapEntries } from '../shared/mapext'
 import { mergeInto, newProfile, parseCoordinateText, slug, type ParseResult } from '../shared/parser'
 import type {
   BackendMessage,
   Bounds,
-  CalibPin,
+  Feature,
+  FeatureGeom,
+  FeatureLayer,
   FrontendMessage,
+  LayerSettings,
   MapImageMeta,
   InjectMode,
   Poi,
@@ -17,14 +21,15 @@ import type {
 } from '../shared/types'
 import { clear, debounce, enableScrub, h, hueOf, icon, numOrNull } from './dom'
 import { History } from './history'
-import { MapView, type Layers, type PinKey, type Tool } from './viewport'
+import { MapView, type Layers, type Tool } from './viewport'
 
-type Tab = 'chat' | 'points' | 'zones' | 'import' | 'image' | 'map'
+type Tab = 'chat' | 'points' | 'zones' | 'layers' | 'import' | 'image' | 'map'
 
 const TABS: [Tab, string][] = [
   ['chat', 'Chat'],
   ['points', 'Points'],
   ['zones', 'Zones'],
+  ['layers', 'Layers'],
   ['import', 'Import'],
   ['image', 'Image'],
   ['map', 'Map'],
@@ -37,7 +42,11 @@ const TOOL_HINT: Partial<Record<Tool, string>> = {
   measure: 'Click two spots to measure. Esc to clear.',
   crop: 'Drag the corners or edges to crop; drag inside to move the box. Esc when done.',
   zone: 'Drag a rectangle to create a zone.',
-  calib: 'Drag pin A / B onto their spots (a click moves the active pin). Shift+drag slides the grid, Shift+wheel scales it.',
+  imgxf: 'Drag inside the picture to move it; corners scale (Shift keeps proportions), edges stretch. Esc when done.',
+  vselect: 'Click a shape to select; drag to move; handles scale and stretch. Space+drag pans.',
+  varea: 'Click to add points or drag freehand; Enter or double-click finishes. Space+drag pans.',
+  vline: 'Click to add points or drag freehand; Enter or double-click finishes. Space+drag pans.',
+  vspot: 'Click to place.',
 }
 
 const UI_KEY = 'map_tracker.ui'
@@ -127,7 +136,9 @@ export class MapApp {
         onContextMenu: (x, y, poi, cx, cy) => this.openMenu(x, y, poi, cx, cy),
         onToolDone: () => this.setTool('pan'),
         onImageEdit: (patch, phase) => this.onImageEdit(patch, phase),
-        onActivePin: (pin) => this.onActivePin(pin),
+        onFeaturesEdit: (next, phase) => this.onFeaturesEdit(next, phase),
+        onFeatureSelection: (ids) => this.onFeatureSelection(ids),
+        warn: (m) => this.warn(m),
       },
       rulerX,
       rulerY,
@@ -341,10 +352,6 @@ export class MapApp {
     if (phase === 'end') this.editGroup = null
   }
 
-  private onActivePin(pin: PinKey): void {
-    this.activatePin(pin, false)
-  }
-
   // ── Toolbar ───────────────────────────────────────────────────────────────
 
   private buildToolbar(): HTMLDivElement {
@@ -367,6 +374,14 @@ export class MapApp {
         toolBtn('dest', 'flag', 'Set destination'),
         toolBtn('add', 'pin', 'Add point'),
         toolBtn('measure', 'ruler', 'Measure distance'),
+      ),
+      h(
+        'div',
+        { class: 'mt-seg', title: 'Shapes (Layers tab)' },
+        toolBtn('vselect', 'select', 'Select shapes'),
+        toolBtn('varea', 'area', 'Draw an area'),
+        toolBtn('vline', 'line', 'Draw a line'),
+        toolBtn('vspot', 'spot', 'Place a spot'),
       ),
       h('div', { class: 'mt-seg' }, this.undoBtn, this.redoBtn),
       h('div', { class: 'mt-spacer' }),
@@ -420,7 +435,15 @@ export class MapApp {
     const hint = TOOL_HINT[t]
     this.hint.hidden = !hint
     this.hint.textContent = hint ?? ''
-    const panelTools: Tool[] = ['crop', 'zone', 'calib']
+    const panelTools: Tool[] = ['crop', 'zone', 'imgxf', 'vselect', 'varea', 'vline', 'vspot']
+    if (['varea', 'vline', 'vspot'].includes(t) && this.tab !== 'layers' && this.profile) {
+      this.tab = 'layers'
+      if (!this.isSideShown()) this.toggleSide()
+    }
+    if (t === 'varea') this.drawGeom = 'area'
+    if (t === 'vline') this.drawGeom = 'line'
+    if (t === 'vspot') this.drawGeom = 'spot'
+    if (t !== 'varea') this.map.vec.holeFor = null
     if (panelTools.includes(t) || panelTools.includes(prev)) this.renderSide()
   }
 
@@ -634,6 +657,9 @@ export class MapApp {
         break
       case 'map':
         this.renderMapTab(body)
+        break
+      case 'layers':
+        this.renderLayersTab(body)
         break
     }
     body.scrollTop = scroll
@@ -1216,108 +1242,314 @@ export class MapApp {
       h('div', { class: 'mt-form mt-form-4' }, h('label', null, 'Left'), cropIn('x'), h('label', null, 'Top'), cropIn('y'), h('label', null, 'Width'), cropIn('w'), h('label', null, 'Height'), cropIn('h')),
     )
 
-    // Placement: two pins tie spots on the image to world coordinates.
+    // Placement: where the picture sits in world coordinates. It's only a
+    // tracing reference; the vector layers are the map.
+    const transforming = this.map.tool === 'imgxf'
     const calib = meta.calib
-    const pinning = this.map.tool === 'calib'
-    const sorted = [...p.points].sort((a, b) => a.name.localeCompare(b.name))
-    const pinCard = (k: PinKey) => {
-      const pin = calib[k]
-      const active = this.map.activePin === k
-      const field = (key: keyof CalibPin, step: string) => {
-        const el = h('input', { class: 'mt-input', type: 'number', step, value: String(pin[key]) })
-        el.addEventListener('change', () => {
-          const v = numOrNull(el.value)
-          if (v !== null) this.mutate((d) => (d.image!.calib[k][key] = v), false)
-        })
-        return el
-      }
-      const snap = h('select', { class: 'mt-select mt-grow', title: 'Use a known place for this pin' }, h('option', { value: '' }, 'Use a place…'))
-      if (k === 'a') snap.append(h('option', { value: '__origin' }, 'Origin (0, 0)'))
-      for (const pt of sorted) snap.append(h('option', { value: pt.id }, `${pt.name} ${formatCoord(pt.x, pt.y)}`))
-      snap.addEventListener('change', () => {
-        const pt = snap.value === '__origin' ? { x: 0, y: 0 } : p.points.find((q) => q.id === snap.value)
-        if (!pt) return
-        this.mutate((d) => Object.assign(d.image!.calib[k], { x: pt.x, y: pt.y }))
-        this.activatePin(k, true)
-      })
-      return h(
-        'div',
-        { class: `mt-pin${active ? ' mt-on' : ''}`, dataset: { pin: k }, onpointerdown: () => this.activatePin(k, false) },
-        h(
-          'div',
-          { class: 'mt-pin-head' },
-          h('span', { class: `mt-pin-badge mt-pin-${k}` }, k.toUpperCase()),
-          h('b', null, k === 'a' && pin.x === 0 && pin.y === 0 ? 'Origin' : `Pin ${k.toUpperCase()}`),
-          h('span', { class: 'mt-dim' }, active && pinning ? 'click the image to place' : ''),
-          h('span', { class: 'mt-spacer' }),
-          h('button', { class: 'mt-btn mt-icon-btn', title: 'Show this pin', onclick: () => this.showPin(k) }, icon('fit')),
-        ),
-        h('div', { class: 'mt-form mt-form-4' }, h('label', null, 'World X'), field('x', 'any'), h('label', null, 'World Y'), field('y', 'any')),
-        h('div', { class: 'mt-row' }, snap),
-        h(
-          'details',
-          { class: 'mt-pin-px' },
-          h('summary', { class: 'mt-dim' }, `On the image: ${Math.round(pin.px)}, ${Math.round(pin.py)} px`),
-          h('div', { class: 'mt-form mt-form-4' }, h('label', null, 'Pixel X'), field('px', '1'), h('label', null, 'Pixel Y'), field('py', '1')),
-        ),
-      )
-    }
-    const { mx, my } = calibMaps(calib)
     const tl = imageToWorld(calib, meta.crop.x, meta.crop.y)
     const br = imageToWorld(calib, meta.crop.x + meta.crop.w, meta.crop.y + meta.crop.h)
-    const pxPerUnit = (a: number) => (Math.abs(a) > 1e-9 ? (1 / Math.abs(a)).toFixed(2) : '?')
-    const scaleText =
-      calib.uniform || Math.abs(Math.abs(mx.a) - Math.abs(my.a)) < 1e-9
-        ? `1 unit = ${pxPerUnit(mx.a)} px`
-        : `1 unit = ${pxPerUnit(mx.a)} px across, ${pxPerUnit(my.a)} px down`
+    const rect = { minX: Math.min(tl.x, br.x), maxX: Math.max(tl.x, br.x), minY: Math.min(tl.y, br.y), maxY: Math.max(tl.y, br.y) }
+    const cx = (rect.minX + rect.maxX) / 2
+    const cy = (rect.minY + rect.maxY) / 2
+    const rw = rect.maxX - rect.minX
+    const rh = rect.maxY - rect.minY
+    const r3 = (n: number) => Math.round(n * 1000) / 1000
+    const place = (next: { cx: number; cy: number; w: number; h: number }) =>
+      this.mutate(
+        (d) =>
+          (d.image!.calib = rectCalibration(d.image!.crop, {
+            minX: next.cx - next.w / 2,
+            maxX: next.cx + next.w / 2,
+            minY: next.cy - next.h / 2,
+            maxY: next.cy + next.h / 2,
+          })),
+        false,
+      )
+    const field = (key: 'cx' | 'cy' | 'w' | 'h', value: number) => {
+      const el = h('input', { class: 'mt-input', type: 'number', step: 'any', value: String(r3(value)) })
+      el.addEventListener('change', () => {
+        const v = numOrNull(el.value)
+        if (v === null || ((key === 'w' || key === 'h') && v <= 0)) return
+        const next = { cx, cy, w: rw, h: rh, [key]: v }
+        if (this.keepAspect && key === 'w') next.h = (rh * v) / rw
+        if (this.keepAspect && key === 'h') next.w = (rw * v) / rh
+        place(next)
+      })
+      return el
+    }
     body.append(
       h('h4', null, 'Placement'),
-      h('div', { class: 'mt-dim' }, 'Two pins tie the picture to your coordinates. Put A on a coordinate you know (usually the origin, 0, 0) and B on a second known place far from it.'),
-      h(
-        'div',
-        { class: 'mt-row' },
-        h('button', { class: `mt-btn${pinning ? ' mt-on mt-primary' : ''}`, onclick: () => this.setTool(pinning ? 'pan' : 'calib') }, icon('pin'), pinning ? 'Done' : 'Edit pins'),
-        h('button', { class: 'mt-btn', title: 'Set pin A to (0, 0), then click where the origin is on the image', onclick: () => this.pickOrigin() }, 'Pick origin'),
-      ),
-      pinCard('a'),
-      pinCard('b'),
-      h(
-        'label',
-        { class: 'mt-check', title: 'One scale for both axes from the distance between the pins. Turn off when the picture is stretched.' },
-        h('input', { type: 'checkbox', checked: calib.uniform, onchange: (e: Event) => this.mutate((d) => (d.image!.calib.uniform = (e.target as HTMLInputElement).checked)) }),
-        'Keep aspect ratio',
-      ),
-      h('div', { class: 'mt-dim mt-mono' }, scaleText),
-      h('div', { class: 'mt-dim mt-mono' }, `Image covers X[${Math.round(Math.min(tl.x, br.x))}, ${Math.round(Math.max(tl.x, br.x))}] Y[${Math.round(Math.min(tl.y, br.y))}, ${Math.round(Math.max(tl.y, br.y))}]`),
+      h('div', { class: 'mt-dim' }, 'Place the picture under your coordinates to trace from it. It doesn’t have to match exactly: the shapes you draw are the map.'),
       h(
         'div',
         { class: 'mt-row mt-wrap' },
+        h('button', { class: `mt-btn${transforming ? ' mt-on mt-primary' : ''}`, onclick: () => this.setTool(transforming ? 'pan' : 'imgxf') }, icon('transform'), transforming ? 'Done' : 'Transform'),
         h('button', { class: 'mt-btn mt-ghost', onclick: () => this.mutate((d) => (d.image!.calib = calibrationForBounds(d.image!.width, d.image!.height, d.bounds))) }, 'Fit to map bounds'),
         h('button', { class: 'mt-btn mt-ghost', onclick: () => this.map.fit() }, 'Fit view'),
       ),
-      pinning ? h('div', { class: 'mt-dim' }, 'Shift+drag on the map slides the whole grid; Shift+wheel scales it around the cursor.') : '',
+      transforming ? h('div', { class: 'mt-dim' }, 'Drag inside to move. Corners scale (Shift keeps proportions); edges stretch one side to squash or widen.') : '',
+      h('div', { class: 'mt-form mt-form-4' }, h('label', null, 'Centre X'), field('cx', cx), h('label', null, 'Centre Y'), field('cy', cy), h('label', null, 'Width'), field('w', rw), h('label', null, 'Height'), field('h', rh)),
+      h(
+        'label',
+        { class: 'mt-check' },
+        h('input', { type: 'checkbox', checked: this.keepAspect, onchange: (e: Event) => (this.keepAspect = (e.target as HTMLInputElement).checked) }),
+        'Keep proportions when typing a size',
+      ),
+      h('div', { class: 'mt-dim mt-mono' }, `Covers X[${Math.round(rect.minX)}, ${Math.round(rect.maxX)}] Y[${Math.round(rect.minY)}, ${Math.round(rect.maxY)}]`),
     )
   }
 
-  /** Make a pin the one a click places; updates the cards in place so inputs keep focus. */
-  private activatePin(k: PinKey, startEditing: boolean): void {
-    this.map.activePin = k
-    for (const card of this.sideBody.querySelectorAll<HTMLElement>('.mt-pin')) card.classList.toggle('mt-on', card.dataset.pin === k)
-    if (startEditing && this.map.tool !== 'calib') this.setTool('calib')
-    this.map.invalidate()
+  private keepAspect = true
+
+  // ── Layers tab: landmass, topography, terrain, props ──────────────────────
+
+  private renderLayersTab(body: HTMLElement): void {
+    const p = this.profile!
+    const fs = p.features ?? []
+    const vec = this.map.vec
+    const active = vec.drawLayer
+
+    const setLayer = (layer: FeatureLayer, patch: Partial<LayerSettings>, group?: string) =>
+      this.mutate((d) => {
+        d.layerSettings = { ...(d.layerSettings ?? {}), [layer]: { ...layerSettings(d.layerSettings, layer), ...patch } }
+      }, !group, group ?? null)
+
+    const rows = LAYER_ORDER.slice()
+      .reverse()
+      .map((layer) => {
+        const st = layerSettings(p.layerSettings, layer)
+        const count = fs.filter((f) => f.layer === layer).length
+        const opacity = h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(st.opacity), class: 'mt-layer-opacity', title: 'Opacity' })
+        opacity.addEventListener('input', () => setLayer(layer, { opacity: Number(opacity.value) }, `opacity-${layer}`))
+        return h(
+          'div',
+          { class: `mt-layer${layer === active ? ' mt-on' : ''}`, onclick: (e: Event) => !(e.target as HTMLElement).closest('button, input') && this.setDrawLayer(layer) },
+          h('button', { class: `mt-btn mt-icon-btn${st.visible ? '' : ' mt-off'}`, title: st.visible ? 'Hide layer' : 'Show layer', onclick: () => setLayer(layer, { visible: !st.visible }) }, icon(st.visible ? 'eye' : 'eyeOff')),
+          h('button', { class: `mt-btn mt-icon-btn${st.locked ? ' mt-on' : ''}`, title: st.locked ? 'Unlock layer' : 'Lock layer', onclick: () => setLayer(layer, { locked: !st.locked }) }, icon(st.locked ? 'lock' : 'unlock')),
+          h('span', { class: 'mt-layer-name' }, LAYER_LABEL[layer]),
+          h('span', { class: 'mt-dim' }, String(count)),
+          opacity,
+        )
+      })
+    body.append(h('h4', null, 'Layers'), h('div', { class: 'mt-layers-list' }, ...rows))
+
+    // Drawing: pick a type, then the tool for its shape.
+    const types = FEATURE_TYPES[active]
+    const typeSel = h('select', { class: 'mt-select mt-grow', title: 'What to draw' })
+    types.forEach((t, i) => typeSel.append(h('option', { value: String(i) }, `${t.label} (${t.geom})`)))
+    const cur = types.findIndex((t) => t.type === vec.drawType && t.geom === this.drawGeom)
+    typeSel.value = String(Math.max(0, cur))
+    typeSel.addEventListener('change', () => {
+      const t = types[Number(typeSel.value)]
+      vec.drawType = t.type
+      this.drawGeom = t.geom
+      this.setTool(t.geom === 'area' ? 'varea' : t.geom === 'line' ? 'vline' : 'vspot')
+    })
+    const tool = this.map.tool
+    const drawBtn = (t: Tool, ico: Parameters<typeof icon>[0], label: string, geom?: FeatureGeom) =>
+      h(
+        'button',
+        {
+          class: `mt-btn${tool === t ? ' mt-on mt-primary' : ''}`,
+          disabled: !!geom && !types.some((x) => x.geom === geom),
+          onclick: () => {
+            if (geom && !types.some((x) => x.type === vec.drawType && x.geom === geom)) {
+              const first = types.find((x) => x.geom === geom)!
+              vec.drawType = first.type
+            }
+            if (geom) this.drawGeom = geom
+            this.setTool(tool === t ? 'pan' : t)
+          },
+        },
+        icon(ico),
+        label,
+      )
+    body.append(
+      h('h4', null, `Draw on ${LAYER_LABEL[active]}`),
+      h('div', { class: 'mt-row' }, typeSel),
+      h('div', { class: 'mt-row mt-wrap' }, drawBtn('vselect', 'select', 'Select'), drawBtn('varea', 'area', 'Area', 'area'), drawBtn('vline', 'line', 'Line', 'line'), drawBtn('vspot', 'spot', 'Spot', 'spot')),
+      h(
+        'div',
+        { class: 'mt-dim' },
+        tool === 'varea' || tool === 'vline'
+          ? 'Click to add points, or drag to draw freehand. Enter or double-click finishes; Backspace removes the last point; Esc cancels. Hold Space to pan.'
+          : tool === 'vselect'
+            ? 'Click a shape to select it (Shift adds). Drag to move; handles scale (Shift keeps proportions, Alt from the centre). Drag a vertex to move it, double-click an edge to add one, Alt+click or Delete removes one.'
+            : 'Pick what to draw, then Area, Line or Spot.',
+      ),
+    )
+
+    // Selection.
+    const selected = fs.filter((f) => vec.selection.has(f.id))
+    if (selected.length === 1) body.append(this.featureEditor(selected[0]))
+    else if (selected.length > 1) {
+      body.append(
+        h('h4', null, `${selected.length} shapes selected`),
+        h('div', { class: 'mt-dim' }, 'Drag the handles on the map to move, scale or stretch them together.'),
+        h('div', { class: 'mt-row' }, this.moveToLayerSelect(selected), h('button', { class: 'mt-btn mt-danger', onclick: () => vec.deleteSelected() }, 'Delete')),
+      )
+    }
+
+    body.append(
+      h('h4', null, 'Layer tools'),
+      h(
+        'div',
+        { class: 'mt-row mt-wrap' },
+        h(
+          'button',
+          {
+            class: 'mt-btn',
+            title: 'Select every shape on this layer, e.g. to move or stretch the whole landmass onto your coordinates',
+            disabled: !fs.some((f) => f.layer === active),
+            onclick: () => {
+              this.setTool('vselect')
+              const ids = fs.filter((f) => f.layer === active).map((f) => f.id)
+              vec.setSelection(ids)
+              this.renderSide(true)
+            },
+          },
+          'Select whole layer',
+        ),
+        h('button', { class: 'mt-btn', onclick: () => void this.importLayers() }, 'Import shapes…'),
+        h('button', { class: 'mt-btn', disabled: !fs.length, onclick: () => this.exportLayers() }, 'Export GeoJSON'),
+      ),
+      h('div', { class: 'mt-dim' }, 'Import accepts a map file, a GeoJSON FeatureCollection (properties: layer, type) or a list of shapes.'),
+    )
   }
 
-  private pickOrigin(): void {
-    const im = this.profile?.image
-    if (!im) return
-    if (im.calib.a.x !== 0 || im.calib.a.y !== 0) this.mutate((d) => Object.assign(d.image!.calib.a, { x: 0, y: 0 }))
-    this.activatePin('a', true)
-    this.warn('Click where (0, 0) is on the image, or drag pin A there.')
+  private drawGeom: FeatureGeom = 'area'
+
+  private setDrawLayer(layer: FeatureLayer): void {
+    const vec = this.map.vec
+    vec.drawLayer = layer
+    const t = FEATURE_TYPES[layer].find((x) => x.geom === this.drawGeom) ?? FEATURE_TYPES[layer][0]
+    vec.drawType = t.type
+    this.drawGeom = t.geom
+    if (this.map.tool === 'varea' || this.map.tool === 'vline' || this.map.tool === 'vspot') this.setTool(t.geom === 'area' ? 'varea' : t.geom === 'line' ? 'vline' : 'vspot')
+    this.renderSide(true)
   }
 
-  private showPin(k: PinKey): void {
-    const pin = this.profile?.image?.calib[k]
-    if (pin) this.map.centerOn(pin.x, pin.y)
+  private moveToLayerSelect(selected: Feature[]): HTMLElement {
+    const sel = h('select', { class: 'mt-select', title: 'Move to another layer' }, h('option', { value: '' }, 'Move to layer…'))
+    for (const l of LAYER_ORDER) sel.append(h('option', { value: l }, LAYER_LABEL[l]))
+    sel.addEventListener('change', () => {
+      const layer = sel.value as FeatureLayer
+      if (!layer) return
+      const ids = new Set(selected.map((f) => f.id))
+      this.mutate((d) => {
+        d.features = (d.features ?? []).map((f) => {
+          if (!ids.has(f.id)) return f
+          const ok = FEATURE_TYPES[layer].find((t) => t.type === f.type && t.geom === f.geom) ?? FEATURE_TYPES[layer].find((t) => t.geom === f.geom)
+          return { ...f, layer, type: ok?.type ?? f.type }
+        })
+      })
+    })
+    return sel
+  }
+
+  private featureEditor(f: Feature): HTMLElement {
+    const types = FEATURE_TYPES[f.layer].filter((t) => t.geom === f.geom)
+    const update = (patch: Partial<Feature>) =>
+      this.mutate((d) => {
+        d.features = (d.features ?? []).map((q) => (q.id === f.id ? { ...q, ...patch } : q))
+      })
+    const name = h('input', { class: 'mt-input', value: f.name ?? '', placeholder: 'Unnamed' })
+    name.addEventListener('change', () => update({ name: name.value.trim() || undefined }))
+    const typeSel = h('select', { class: 'mt-select' })
+    for (const t of types) typeSel.append(h('option', { value: t.type }, t.label))
+    if (!types.some((t) => t.type === f.type)) typeSel.append(h('option', { value: f.type }, f.type))
+    typeSel.value = f.type
+    typeSel.addEventListener('change', () => update({ type: typeSel.value }))
+    const fields: HTMLElement[] = [h('label', null, 'Name'), name, h('label', null, 'Type'), typeSel]
+    if (f.layer === 'topography') {
+      const el = h('input', { class: 'mt-input', type: 'number', step: 'any', value: f.elevation === undefined ? '' : String(f.elevation), placeholder: 'height' })
+      el.addEventListener('change', () => update({ elevation: numOrNull(el.value) ?? undefined }))
+      fields.push(h('label', null, 'Elevation'), el)
+    }
+    if (f.geom === 'spot') {
+      const el = h('input', { class: 'mt-input', type: 'number', step: '0.1', min: '0.3', max: '6', value: String(f.size ?? 1) })
+      el.addEventListener('change', () => update({ size: Math.max(0.3, Math.min(6, numOrNull(el.value) ?? 1)) }))
+      fields.push(h('label', null, 'Size'), el)
+    }
+    const color = h('input', { class: 'mt-color', type: 'color', value: f.color || '#7aa2ff' })
+    color.addEventListener('change', () => update({ color: color.value }))
+    const verts = f.rings.reduce((n, r) => n + r.length, 0)
+    const vec = this.map.vec
+    return h(
+      'div',
+      { class: 'mt-editor' },
+      h('div', { class: 'mt-form' }, ...fields),
+      h(
+        'div',
+        { class: 'mt-row mt-wrap' },
+        f.geom !== 'spot'
+          ? h('label', { class: 'mt-check' }, h('input', { type: 'checkbox', checked: !!f.smooth, onchange: (e: Event) => update({ smooth: (e.target as HTMLInputElement).checked || undefined }) }), 'Smooth')
+          : '',
+        h('label', { class: 'mt-check' }, color, 'Color'),
+        f.color ? h('button', { class: 'mt-btn mt-ghost', onclick: () => update({ color: undefined }) }, 'Auto') : '',
+      ),
+      h('div', { class: 'mt-dim' }, f.geom === 'spot' ? formatCoord(f.rings[0][0][0], f.rings[0][0][1], 1) : `${verts} points${f.rings.length > 1 ? ` · ${f.rings.length - 1} hole${f.rings.length > 2 ? 's' : ''}` : ''}`),
+      h(
+        'div',
+        { class: 'mt-row mt-wrap' },
+        f.geom === 'area'
+          ? h(
+              'button',
+              {
+                class: 'mt-btn',
+                title: 'Draw an area inside this shape to cut it out (a lake, an inland sea)',
+                onclick: () => {
+                  vec.holeFor = f.id
+                  this.setTool('varea')
+                  this.warn('Draw the hole inside the shape; Enter finishes.')
+                },
+              },
+              icon('hole'),
+              'Cut a hole',
+            )
+          : '',
+        this.moveToLayerSelect([f]),
+        h('button', { class: 'mt-btn mt-danger', onclick: () => vec.deleteSelected() }, 'Delete'),
+      ),
+    )
+  }
+
+  private onFeaturesEdit(next: Feature[], phase: 'move' | 'end'): void {
+    if (!this.profile) return
+    this.editGroup ??= `shapes-${Date.now()}`
+    this.mutate((p) => (p.features = next), phase === 'end')
+    if (phase === 'end') this.editGroup = null
+  }
+
+  private onFeatureSelection(_ids: string[]): void {
+    if (this.tab === 'layers') this.renderSide(true)
+  }
+
+  private async importLayers(): Promise<void> {
+    const files = await this.ctx.uploads.pickFile({ accept: ['.json', '.geojson', 'application/json', 'application/geo+json'], maxSizeBytes: 20 * 1024 * 1024 }).catch(() => [])
+    const file = files[0]
+    if (!file || !this.profile) return
+    let shapes: Feature[] | null = null
+    try {
+      shapes = featuresFromJson(JSON.parse(new TextDecoder().decode(file.bytes)))
+    } catch (err) {
+      return this.warn(`Could not read that file: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    if (!shapes?.length) return this.warn('No shapes found in that file.')
+    const used = new Set((this.profile.features ?? []).map((f) => f.id))
+    const incoming = shapes.map((f) => (used.has(f.id) ? { ...f, id: newFeatureId(f.layer) } : f))
+    this.mutate((d) => (d.features = [...(d.features ?? []), ...incoming]))
+    this.warn(`Imported ${incoming.length} shapes.`)
+  }
+
+  private exportLayers(): void {
+    const p = this.profile
+    if (!p?.features?.length) return
+    const blob = new Blob([JSON.stringify(featuresToGeoJson(p.features), null, 1)], { type: 'application/geo+json' })
+    const a = h('a', { href: URL.createObjectURL(blob), download: `${slug(p.name)}.layers.geojson` })
+    document.body.append(a)
+    a.click()
+    setTimeout(() => (URL.revokeObjectURL(a.href), a.remove()), 1000)
   }
 
   private async uploadImage(): Promise<void> {

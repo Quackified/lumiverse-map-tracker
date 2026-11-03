@@ -1,4 +1,4 @@
-import type { Bounds, CalibPin, Calibration, ChatMapState, LegacyCalibration, Poi, Settings, WorldProfile, Zone } from './types'
+import type { Bounds, CalibPin, Calibration, Rect, ChatMapState, LegacyCalibration, Poi, Settings, WorldProfile, Zone } from './types'
 
 const COMPASS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']
 
@@ -198,6 +198,16 @@ export function calibrationForBounds(width: number, height: number, b: Bounds): 
     a: { ...toPx(0, 0), x: 0, y: 0 },
     b: { px: width, py: height, x: r2(cx + (s * width) / 2), y: r2(cy - (s * height) / 2) },
     uniform: true,
+  }
+}
+
+/** Pins on the crop corners that place the cropped image over a world rectangle. */
+export function rectCalibration(crop: Rect, r: Bounds): Calibration {
+  const q = (n: number) => Math.round(n * 1000) / 1000
+  return {
+    a: { px: crop.x, py: crop.y, x: q(r.minX), y: q(r.maxY) },
+    b: { px: crop.x + crop.w, py: crop.y + crop.h, x: q(r.maxX), y: q(r.minY) },
+    uniform: false,
   }
 }
 

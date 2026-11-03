@@ -82,12 +82,28 @@ Markdown version of the same thing:
 ## Map image
 
 - **Crop:** click **Edit crop** and drag the corner or edge handles on the map; drag inside the box to move it. The rest of the picture stays visible, dimmed.
-- **Placement:** two pins tie the picture to your coordinates. Click **Edit pins**, then drag pin **A** onto a coordinate you know (usually the origin; **Pick origin** sets A to 0,0 and lets you click where it is) and pin **B** onto a second known place. **Use a place…** fills a pin's coordinate from one of your points. While you edit, the picture holds still and the grid and points move, so you can see them line up.
-  - **Keep aspect ratio** (on by default) uses one scale for both axes. Turn it off when the picture is stretched, so X and Y scale separately.
-  - On the map, **Shift+drag** slides the whole grid and **Shift+wheel** scales it around the cursor.
+- **Placement:** the picture is a tracing reference, not the map. Click **Transform**, then drag inside it to move, a corner to scale (Shift keeps proportions) or an edge to squash or stretch one side. Centre, width and height can also be typed. **Fit to map bounds** starts it over your coordinates.
 - **Number fields:** Ctrl+drag changes the value by 1, Shift by 10, Ctrl+Shift by 100, Alt by 0.1 (Ctrl+Alt by 0.01). Whole steps snap to round numbers. The arrow keys use the same modifiers.
 - **Undo / Redo:** Ctrl+Z and Ctrl+Shift+Z (or the toolbar arrows) undo edits to points, zones, bounds, crop and pins. A drag or a scrub counts as one step.
 - **Export JSON / Import JSON** (Import tab) moves a map between installs. The file holds points, zones, crop and calibration but not the image. After importing, upload the image; if its size matches, the crop and calibration apply automatically.
+
+## Map layers (shapes)
+
+Draw the world itself in world coordinates, so the map conforms to your data instead of to a picture. Open the **Layers** tab.
+
+| Layer | Holds |
+|---|---|
+| **Landmass** | Land outlines (with holes for lakes and inland seas), lakes, shorelines. The sea is drawn around the land. |
+| **Topography** | Contours with an elevation (coloured from lowland green to snowcap), spot heights |
+| **Terrain** | Forest, jungle, grassland, desert, snow, swamp, volcanic land, hills; mountain ranges, rivers, roads; volcanoes, peaks, oases |
+| **Props** | Cities, towns, castles, towers, ports, ruins, temples, crystals, camps, walls |
+
+- Each layer can be shown or hidden, locked, and faded. Click a layer to draw on it.
+- **Drawing:** pick a type, then **Area**, **Line** or **Spot** (also in the toolbar). Click to add points or drag to draw freehand. Enter or double-click finishes, Backspace removes the last point, Esc cancels. Hold Space (or the middle mouse button) to pan while drawing.
+- **Editing:** with **Select**, click a shape (Shift adds more), drag to move it, and use the handles to scale or stretch (Shift keeps proportions, Alt scales from the centre). Drag a vertex to move it, double-click an edge to add one, Alt+click or Delete removes one. **Cut a hole** draws a lake into a land shape.
+- **Select whole layer** picks every shape on a layer, so you can move and stretch an entire traced landmass onto your lorebook coordinates in one go.
+- **Import shapes…** takes a map file, a list of shapes, or a GeoJSON FeatureCollection (`properties.layer` and `properties.type`; x first). **Export GeoJSON** writes the same.
+- Hovering shows what the layers say is there, e.g. "Land · Forest" or "Sea".
 
 ## The window
 

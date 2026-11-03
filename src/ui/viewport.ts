@@ -476,6 +476,9 @@ export class MapView {
       if (e.button !== 0 && !middle && e.pointerType === 'mouse') return
       if (middle) e.preventDefault()
       el.focus({ preventScroll: true })
+      // A primary press means nothing else is down: finish anything whose
+      // release never arrived, so it can't turn this press into a pinch.
+      if (e.isPrimary) for (const id of [...this.pointers.keys()]) end(e, id)
       el.setPointerCapture(e.pointerId)
       const p = this.local(e)
       this.pointers.set(e.pointerId, p)
@@ -535,6 +538,9 @@ export class MapView {
     })
 
     el.addEventListener('pointermove', (e) => {
+      // Moving with no button held: the release was lost (the host moved focus
+      // or the element lost capture), so end the gesture rather than keep painting.
+      if (this.pointers.has(e.pointerId) && e.pointerType !== 'touch' && e.buttons === 0) end(e)
       const p = this.local(e)
       if (this.pointers.has(e.pointerId)) this.pointers.set(e.pointerId, p)
       const g = this.gesture
@@ -587,9 +593,11 @@ export class MapView {
       this.updateHover(p.x, p.y)
     })
 
-    const end = (e: PointerEvent) => {
-      if (!this.pointers.has(e.pointerId)) return
-      this.pointers.delete(e.pointerId)
+    /** Release a pointer. `id` ends a stale pointer other than the event's, at its last position. */
+    const end = (e: PointerEvent, id = e.pointerId) => {
+      const last = this.pointers.get(id)
+      if (!last) return
+      this.pointers.delete(id)
       const g = this.gesture
       if (g?.mode === 'pinch') {
         if (this.pointers.size === 0) this.gesture = null
@@ -597,7 +605,7 @@ export class MapView {
       }
       this.gesture = null
       if (!g) return
-      const p = this.local(e)
+      const p = id === e.pointerId && e.type !== 'lostpointercapture' ? this.local(e) : last
       if (g.mode === 'crop' || g.mode === 'imgxf') {
         if (g.moved) this.editDrag(g, p.x, p.y, 'end', e.shiftKey)
         this.updateHover(p.x, p.y)
@@ -635,8 +643,9 @@ export class MapView {
       }
       if (!g.moved && e.type === 'pointerup') this.click(p.x, p.y)
     }
-    el.addEventListener('pointerup', end)
-    el.addEventListener('pointercancel', end)
+    el.addEventListener('pointerup', (e) => end(e))
+    el.addEventListener('pointercancel', (e) => end(e))
+    el.addEventListener('lostpointercapture', (e) => end(e))
 
     el.addEventListener('pointerleave', () => {
       if (this.gesture) return

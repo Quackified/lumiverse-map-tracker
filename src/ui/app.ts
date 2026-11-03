@@ -135,7 +135,10 @@ export class MapApp {
   private movedOnly = false
   /** Land painting state. */
   private landBiome = DEFAULT_LAND
-  private landKeepCoast = true
+  private landKeepCoast = false
+  /** Cells the current brush stroke skipped because of Keep coastline, and cells it changed. */
+  private landBlocked = 0
+  private landPainted = 0
   private landDetail = 10000
   private landSeed = { tolerance: 120, smooth: 1, minRegion: 6 }
   private landStroke: Uint8Array | null = null
@@ -2004,14 +2007,21 @@ export class MapApp {
     if (phase === 'down') {
       this.landStroke = new Uint8Array(biomesOf(grid, graph))
       this.editGroup = `land-${Date.now()}`
+      this.landBlocked = 0
+      this.landPainted = 0
     }
     const stroke = this.landStroke
     if (!stroke) return
     if (phase !== 'end') {
       let changed = false
       for (const c of cellsWithin(graph, x, y, this.map.brushPx * this.map.unitsPerPx())) {
-        if (stroke[c] === target || !allowed(stroke[c])) continue
+        if (stroke[c] === target) continue
+        if (!allowed(stroke[c])) {
+          this.landBlocked++
+          continue
+        }
         stroke[c] = target
+        this.landPainted++
         changed = true
       }
       if (changed && !this.landFrame) {
@@ -2027,6 +2037,8 @@ export class MapApp {
     this.commitStroke(true)
     this.landStroke = null
     this.editGroup = null
+    if (this.landBlocked && !this.landPainted)
+      this.warn(isWater(target) ? 'Keep coastline is on, so water only paints over water. Untick it to flood land.' : 'Keep coastline is on, so land only paints over land. Untick it to draw new land on the sea.')
   }
 
   private commitStroke(final: boolean): void {

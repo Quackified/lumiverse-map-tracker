@@ -194,6 +194,8 @@ textarea.mt-input { height: auto; padding: 6px 8px; resize: vertical; width: 100
 .mt-item:hover { background: var(--mt-fill-subtle); }
 .mt-item.mt-on { background: color-mix(in srgb, var(--mt-primary) 16%, transparent); }
 .mt-item.mt-muted { opacity: .5; }
+.mt-moved { color: var(--mt-primary); }
+.mt-var { font-family: ui-monospace, monospace; font-size: 11px; word-break: break-all; }
 .mt-item-name { padding: 3px 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mt-dot { width: 9px; height: 9px; border-radius: 50%; }
 .mt-swatch { width: 11px; height: 11px; border: 2px dashed; border-radius: 2px; }

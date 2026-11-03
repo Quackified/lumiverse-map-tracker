@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import manifest from '../spindle.json'
+import { movePoint, placeRef, placesVarName, placesVarValue, revertPoint } from '../src/shared/places'
 import {
   bearing,
   buildContext,
@@ -20,7 +21,7 @@ import {
 import { areasAt, featuresFromJson, featuresToGeoJson, pointInRings, simplify } from '../src/shared/features'
 import { entriesFromLorebookJson, parseMapEntries } from '../src/shared/mapext'
 import { mergeInto, newProfile, parseCoordinateText, parseSpans } from '../src/shared/parser'
-import type { Calibration, LegacyCalibration, WorldProfile } from '../src/shared/types'
+import type { Calibration, LegacyCalibration, Poi, WorldProfile } from '../src/shared/types'
 
 const SAMPLE = `---
 title: '[LOC] Map Coordinates'
@@ -432,5 +433,43 @@ describe('vector layers', () => {
     const squashed = rectCalibration(crop, { minX: -400, maxX: 100, minY: 0, maxY: 150 })
     expect(imageToWorld(squashed, 900, 450).y).toBeCloseTo(0, 9)
     expect(imageToWorld(squashed, 900, 450).x).toBeCloseTo(100, 9)
+  })
+})
+
+describe('moving places', () => {
+  const poi = (id: string, name: string, x: number, y: number): Poi => ({ id, name, x, y, group: 'G' })
+
+  it('remembers the lorebook position on the first move and forgets it when moved back', () => {
+    const p = poi('shackle-city', 'Shackle City', -20, 60)
+    movePoint(p, -26, 67)
+    movePoint(p, -25, 66)
+    expect(p.origin).toEqual({ x: -20, y: 60 })
+    movePoint(p, -20, 60)
+    expect(p.origin).toBeUndefined()
+    movePoint(p, 1, 2)
+    revertPoint(p)
+    expect([p.x, p.y, p.origin]).toEqual([-20, 60, undefined])
+  })
+
+  it('keeps moved places through a lorebook re-import, in both modes', () => {
+    const moved = poi('shackle-city', 'Shackle City', -26, 67)
+    moved.origin = { x: -20, y: 60 }
+    const profile: WorldProfile = { ...newProfile('Endwright', 'e'), points: [moved, poi('auston', 'Auston', 15, -5)] }
+    const parsed = { points: [poi('shackle-city', 'Shackle City', -18, 61), poi('auston', 'Auston', 16, -5)], zones: [], skipped: 0 }
+    for (const mode of ['replace', 'merge'] as const) {
+      const next = mergeInto(profile, structuredClone(parsed), mode)
+      const s = next.points.find((q) => q.name === 'Shackle City')!
+      expect([s.x, s.y, s.origin]).toEqual([-26, 67, { x: -18, y: 61 }])
+      expect(next.points.find((q) => q.name === 'Auston')!.x).toBe(16)
+    }
+  })
+
+  it('publishes coordinates as one JSON variable that getgvarkey can read', () => {
+    expect(placesVarName('Endwright')).toBe('endwright_places')
+    expect(placesVarName('Articfic Realm!')).toBe('articfic_realm_places')
+    const value = JSON.parse(placesVarValue([poi('shackle-city', 'Shackle City', -20, 60), poi('x', 'X', 0.5, -0)]))
+    expect(value).toEqual({ 'shackle-city': '(-20, 60)', x: '(0.5, 0)' })
+    expect(placeRef('endwright_places', 'shackle-city')).toBe('{{getgvarkey::endwright_places::shackle-city}}')
+    expect(placeRef('v', '2024')).toBe('{{getgvarkey::v::["2024"]}}')
   })
 })

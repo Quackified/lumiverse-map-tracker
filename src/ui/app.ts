@@ -3,6 +3,7 @@ import { bearing, boundsOf, calibMaps, calibrationForBounds, compass, distanceUn
 import { FEATURE_TYPES, LAYER_LABEL, LAYER_ORDER, featuresFromJson, featuresToGeoJson, layerSettings, newFeatureId } from '../shared/features'
 import { entriesFromLorebookJson, hasMapData, parseMapEntries } from '../shared/mapext'
 import { mergeInto, newProfile, parseCoordinateText, slug, type ParseResult } from '../shared/parser'
+import { VAR_NAME_RE, isMoved, movePoint, placeRef, placeText, placesVarName, revertPoint } from '../shared/places'
 import type {
   BackendMessage,
   Bounds,
@@ -47,6 +48,7 @@ const TOOL_HINT: Partial<Record<Tool, string>> = {
   varea: 'Click to add points or drag freehand; Enter or double-click finishes. Space+drag pans.',
   vline: 'Click to add points or drag freehand; Enter or double-click finishes. Space+drag pans.',
   vspot: 'Click to place.',
+  pmove: 'Drag places to move them (Shift 10, Alt 0.1); arrows nudge. Rings mark lorebook positions.',
 }
 
 const UI_KEY = 'map_tracker.ui'
@@ -106,6 +108,7 @@ export class MapApp {
   /** Groups a run of edits (a drag, a scrub) into one undo step. */
   private editGroup: string | null = null
   private pointFilter = ''
+  private movedOnly = false
   private importText = ''
   private importMode: 'merge' | 'replace' | 'new' = 'merge'
   private importPreview: ParseResult | null = null
@@ -133,6 +136,7 @@ export class MapApp {
         onPick: (tool, x, y) => this.onPick(tool, x, y),
         onRect: (tool, r) => this.onRect(tool, r),
         onSelectPoi: (poi) => this.onSelectPoi(poi),
+        onPoiMove: (id, x, y, phase) => this.onPoiMove(id, x, y, phase),
         onContextMenu: (x, y, poi, cx, cy) => this.openMenu(x, y, poi, cx, cy),
         onToolDone: () => this.setTool('pan'),
         onImageEdit: (patch, phase) => this.onImageEdit(patch, phase),
@@ -373,6 +377,7 @@ export class MapApp {
         toolBtn('me', 'me', 'Set my position'),
         toolBtn('dest', 'flag', 'Set destination'),
         toolBtn('add', 'pin', 'Add point'),
+        toolBtn('pmove', 'movepin', 'Move places'),
         toolBtn('measure', 'ruler', 'Measure distance'),
       ),
       h(
@@ -435,7 +440,7 @@ export class MapApp {
     const hint = TOOL_HINT[t]
     this.hint.hidden = !hint
     this.hint.textContent = hint ?? ''
-    const panelTools: Tool[] = ['crop', 'zone', 'imgxf', 'vselect', 'varea', 'vline', 'vspot']
+    const panelTools: Tool[] = ['crop', 'zone', 'imgxf', 'vselect', 'varea', 'vline', 'vspot', 'pmove']
     if (['varea', 'vline', 'vspot'].includes(t) && this.tab !== 'layers' && this.profile) {
       this.tab = 'layers'
       if (!this.isSideShown()) this.toggleSide()
@@ -537,6 +542,30 @@ export class MapApp {
     if (this.tab === 'points') this.renderSide(true)
   }
 
+  private onPoiMove(id: string, x: number, y: number, phase: 'move' | 'end'): void {
+    this.editGroup ??= `poi-${id}-${Date.now()}`
+    this.mutate(
+      (d) => {
+        const t = d.points.find((q) => q.id === id)
+        if (t) movePoint(t, x, y)
+      },
+      phase === 'end',
+    )
+    if (phase === 'end') this.editGroup = null
+  }
+
+  private revertPoi(ids: string[]): void {
+    const set = new Set(ids)
+    this.mutate((d) => d.points.forEach((q) => set.has(q.id) && revertPoint(q)))
+  }
+
+  private copyRef(pt: Poi): void {
+    const p = this.profile!
+    const ref = placeRef(p.placesVar ?? placesVarName(p.name), pt.id)
+    void navigator.clipboard?.writeText(ref)
+    this.warn(p.placesVar ? `Copied ${ref}` : `Copied ${ref}. Turn on the lorebook variable in Points so it resolves.`)
+  }
+
   private openMenu(x: number, y: number, poi: Poi | null, clientX: number, clientY: number): void {
     const chatId = this.chatId()
     const tx = poi ? poi.x : round2(x)
@@ -555,6 +584,8 @@ export class MapApp {
           })
         : item('Add point here', () => this.onPick('add', x, y), !this.profile),
       item('Copy coordinates', () => void navigator.clipboard?.writeText(formatCoord(tx, ty, poi ? 0 : 1))),
+      ...(poi ? [item('Copy lorebook reference', () => this.copyRef(poi))] : []),
+      ...(poi?.origin ? [item(`Back to lorebook position ${placeText(poi.origin.x, poi.origin.y)}`, () => this.revertPoi([poi.id]))] : []),
     )
     const r = this.map.el.getBoundingClientRect()
     this.menu.hidden = false
@@ -775,8 +806,40 @@ export class MapApp {
       renderList()
     })
     body.append(
-      h('div', { class: 'mt-row' }, search, h('button', { class: 'mt-btn', title: 'Add point (click on map)', onclick: () => this.setTool('add') }, icon('plus'), 'Add')),
+      h(
+        'div',
+        { class: 'mt-row' },
+        search,
+        h('button', { class: 'mt-btn', title: 'Add point (click on map)', onclick: () => this.setTool('add') }, icon('plus'), 'Add'),
+        h(
+          'button',
+          { class: `mt-btn${this.map.tool === 'pmove' ? ' mt-on' : ''}`, title: 'Drag places on the map', onclick: () => this.setTool(this.map.tool === 'pmove' ? 'pan' : 'pmove') },
+          icon('movepin'),
+          'Move',
+        ),
+      ),
     )
+    const moved = p.points.filter(isMoved)
+    if (!moved.length) this.movedOnly = false
+    if (moved.length) {
+      const only = h('input', { type: 'checkbox', checked: this.movedOnly })
+      only.addEventListener('change', () => {
+        this.movedOnly = only.checked
+        renderList()
+      })
+      body.append(
+        h(
+          'div',
+          { class: 'mt-row mt-wrap' },
+          h('span', { class: 'mt-moved' }, `${moved.length} moved`),
+          h('span', { class: 'mt-dim' }, 'from their lorebook position'),
+          h('span', { class: 'mt-spacer' }),
+          h('label', { class: 'mt-check' }, only, 'Only moved'),
+          h('button', { class: 'mt-btn mt-ghost', title: 'Put every moved place back where the lorebook has it', onclick: () => this.revertPoi(moved.map((q) => q.id)) }, 'Revert all'),
+        ),
+      )
+    }
+    body.append(this.placesVarBox(p))
     const editing = p.points.find((pt) => pt.id === this.editingPoi)
     if (editing) body.append(this.poiEditor(editing))
     const list = h('div', { class: 'mt-list' })
@@ -787,6 +850,7 @@ export class MapApp {
       const q = this.pointFilter.trim().toLowerCase()
       const groups = new Map<string, Poi[]>()
       for (const pt of p.points) {
+        if (this.movedOnly && !isMoved(pt)) continue
         if (q && !`${pt.name} ${pt.group} ${pt.note ?? ''}`.toLowerCase().includes(q)) continue
         const g = pt.group || 'Ungrouped'
         if (!groups.has(g)) groups.set(g, [])
@@ -803,7 +867,9 @@ export class MapApp {
               { class: `mt-item${pt.id === this.editingPoi ? ' mt-on' : ''}${pt.hidden ? ' mt-muted' : ''}` },
               h('span', { class: 'mt-dot', style: `background:${color}` }),
               h('button', { class: 'mt-item-name', onclick: () => this.focusPoi(pt) }, pt.name),
-              h('span', { class: 'mt-dim mt-mono' }, formatCoord(pt.x, pt.y)),
+              pt.origin
+                ? h('span', { class: 'mt-mono mt-moved', title: `Moved. Lorebook: ${placeText(pt.origin.x, pt.origin.y)}` }, formatCoord(pt.x, pt.y))
+                : h('span', { class: 'mt-dim mt-mono' }, formatCoord(pt.x, pt.y)),
               h('button', { class: 'mt-btn mt-icon-btn', title: 'Edit', onclick: () => ((this.editingPoi = pt.id), this.renderSide(true)) }, '✎'),
             ),
           )
@@ -813,6 +879,40 @@ export class MapApp {
       if (!groups.size) list.append(h('p', { class: 'mt-dim' }, q ? 'No matches.' : 'No points yet. Import coordinates or add points on the map.'))
     }
     renderList()
+  }
+
+  /** Publish place coordinates to a global variable that lorebook entries read. */
+  private placesVarBox(p: WorldProfile): HTMLElement {
+    const on = !!p.placesVar
+    const name = h('input', { class: 'mt-input mt-grow mt-mono', value: p.placesVar ?? placesVarName(p.name), spellcheck: false })
+    const check = h('input', { type: 'checkbox', checked: on })
+    const apply = () => {
+      const v = name.value.trim()
+      if (check.checked && !VAR_NAME_RE.test(v)) {
+        check.checked = false
+        return this.warn('Use letters, digits and underscores for the variable name.')
+      }
+      this.mutate((d) => {
+        d.placesVar = check.checked ? v : undefined
+      })
+    }
+    check.addEventListener('change', apply)
+    name.addEventListener('change', () => check.checked && apply())
+    const sample = p.points[0]
+    return h(
+      'details',
+      { class: 'mt-group', open: on },
+      h('summary', null, h('span', null, 'Lorebook variable'), h('span', { class: 'mt-dim' }, on ? ` · ${p.placesVar}` : ' · off')),
+      h('label', { class: 'mt-check' }, check, 'Publish coordinates to a global variable'),
+      h('div', { class: 'mt-row' }, name),
+      h(
+        'div',
+        { class: 'mt-dim' },
+        'Each place is stored as "(x, y)" under its id and updates as you move places. A lorebook entry reads one with ',
+        h('span', { class: 'mt-var' }, placeRef(name.value || 'map_places', sample?.id ?? 'place-id')),
+        '. Copy reference on a place gives its exact macro.',
+      ),
+    )
   }
 
   private focusPoi(pt: Poi): void {
@@ -845,8 +945,7 @@ export class MapApp {
         if (!t) return
         t.name = name.value.trim() || 'Unnamed'
         t.group = group.value.trim()
-        t.x = nx
-        t.y = ny
+        movePoint(t, nx, ny)
         t.note = note.value.trim() || undefined
         t.color = useColor ? color.value : undefined
         t.hidden = hidden.checked || undefined
@@ -870,6 +969,22 @@ export class MapApp {
         h('button', { class: 'mt-btn mt-primary', onclick: save }, 'Save'),
         h('button', { class: 'mt-btn', onclick: () => chatId && this.send({ type: 'setPos', chatId, x: pt.x, y: pt.y }), disabled: !chatId }, 'Move me here'),
         h('button', { class: 'mt-btn', onclick: () => chatId && this.send({ type: 'setDest', chatId, dest: { name: pt.name, x: pt.x, y: pt.y } }), disabled: !chatId }, 'Go here'),
+      ),
+      pt.origin
+        ? h(
+            'div',
+            { class: 'mt-row' },
+            h('span', { class: 'mt-dim' }, 'Lorebook position'),
+            h('span', { class: 'mt-mono mt-moved' }, placeText(pt.origin.x, pt.origin.y)),
+            h('span', { class: 'mt-spacer' }),
+            h('button', { class: 'mt-btn mt-ghost', onclick: () => this.revertPoi([pt.id]) }, 'Revert'),
+          )
+        : '',
+      h(
+        'div',
+        { class: 'mt-row' },
+        h('span', { class: 'mt-var mt-dim mt-grow' }, placeRef(p.placesVar ?? placesVarName(p.name), pt.id)),
+        h('button', { class: 'mt-btn', title: 'Copy the macro a lorebook entry uses for this place', onclick: () => this.copyRef(pt) }, 'Copy reference'),
       ),
       h(
         'div',

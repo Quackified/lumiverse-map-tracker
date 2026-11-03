@@ -16,7 +16,7 @@ import type { Bounds, Calibration, ChatMapState, Feature, MapImageMeta, Poi, Rec
 import { clear, h, hueOf } from './dom'
 import { VectorEditor, isVectorTool, type VectorTool } from './vector'
 
-export type Tool = 'pan' | 'me' | 'dest' | 'add' | 'measure' | 'crop' | 'zone' | 'imgxf' | VectorTool
+export type Tool = 'pan' | 'me' | 'dest' | 'add' | 'measure' | 'crop' | 'zone' | 'imgxf' | 'pmove' | VectorTool
 type CropMode = 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
 
 const CROP_CURSOR: Record<CropMode, string> = {
@@ -63,6 +63,8 @@ export interface MapHooks {
   onFeatureSelection(ids: string[]): void
   warn(message: string): void
   onSelectPoi(poi: Poi | null): void
+  /** A place dragged (or nudged) with the Move places tool. `move` while dragging, `end` once dropped. */
+  onPoiMove(id: string, x: number, y: number, phase: 'move' | 'end'): void
   onContextMenu(x: number, y: number, poi: Poi | null, clientX: number, clientY: number): void
   onToolDone(): void
 }
@@ -126,7 +128,7 @@ export class MapView {
   private dragRect: { a: { x: number; y: number }; b: { x: number; y: number } } | null = null
   private pointers = new Map<number, { x: number; y: number }>()
   private gesture: {
-    mode: 'pan' | 'rect' | 'pinch' | 'crop' | 'imgxf' | 'vector'
+    mode: 'pan' | 'rect' | 'pinch' | 'crop' | 'imgxf' | 'vector' | 'poi'
     sx: number
     sy: number
     moved: boolean
@@ -138,6 +140,9 @@ export class MapView {
     startImg?: { px: number; py: number }
     startRect?: Bounds
     startWorld?: { x: number; y: number }
+    poiId?: string
+    /** Grab offset: place position minus the pointer's world position. */
+    grab?: { x: number; y: number }
   } | null = null
   /** Space held: drag pans whatever the tool. */
   private spaceDown = false
@@ -477,6 +482,17 @@ export class MapView {
             : { ...base, mode: 'crop', crop, startCrop: { ...meta.crop }, startImg: this.screenToImg(p.x, p.y) }
         return
       }
+      if (this.tool === 'pmove') {
+        const poi = this.poiAt(p.x, p.y)
+        if (poi) {
+          const w = this.toWorld(p.x, p.y)
+          this.selectedId = poi.id
+          this.hooks.onSelectPoi(poi)
+          this.gesture = { ...base, mode: 'poi', poiId: poi.id, grab: { x: poi.x - w.x, y: poi.y - w.y } }
+          this.invalidate()
+          return
+        }
+      }
       if (isVectorTool(this.tool) && this.vec.pointerDown(this.tool, p.x, p.y, e)) {
         this.gesture = { ...base, mode: 'vector' }
         return
@@ -510,6 +526,12 @@ export class MapView {
         this.updateHover(p.x, p.y)
         return
       }
+      if (g?.mode === 'poi') {
+        if (!g.moved && Math.hypot(p.x - g.sx, p.y - g.sy) > 2) g.moved = true
+        if (g.moved) this.dragPoi(g, p.x, p.y, e, 'move')
+        this.updateHover(p.x, p.y)
+        return
+      }
       if (isVectorTool(this.tool) && (!g || g.mode === 'vector')) this.vec.pointerMove(this.tool, p.x, p.y, e)
       if (g?.mode === 'vector') {
         this.updateHover(p.x, p.y)
@@ -539,6 +561,11 @@ export class MapView {
       const p = this.local(e)
       if (g.mode === 'crop' || g.mode === 'imgxf') {
         if (g.moved) this.editDrag(g, p.x, p.y, 'end', e.shiftKey)
+        this.updateHover(p.x, p.y)
+        return
+      }
+      if (g.mode === 'poi') {
+        if (g.moved) this.dragPoi(g, p.x, p.y, e, 'end')
         this.updateHover(p.x, p.y)
         return
       }
@@ -617,6 +644,17 @@ export class MapView {
         e.preventDefault()
         return
       }
+      if (this.tool === 'pmove' && this.selectedId && e.key.startsWith('Arrow')) {
+        const pt = this.profile?.points.find((q) => q.id === this.selectedId)
+        if (pt) {
+          const d = snapStep(e)
+          const dx = e.key === 'ArrowLeft' ? -d : e.key === 'ArrowRight' ? d : 0
+          const dy = e.key === 'ArrowDown' ? -d : e.key === 'ArrowUp' ? d : 0
+          this.hooks.onPoiMove(pt.id, snapTo(pt.x + dx, d), snapTo(pt.y + dy, d), 'end')
+          e.preventDefault()
+          return
+        }
+      }
       const step = 60 / this.view.s
       const k = e.key
       if (k === '+' || k === '=') this.zoomBy(1.25)
@@ -666,6 +704,13 @@ export class MapView {
     }
   }
 
+  private dragPoi(g: NonNullable<MapView['gesture']>, sx: number, sy: number, e: { shiftKey: boolean; altKey: boolean; ctrlKey: boolean; metaKey: boolean }, phase: 'move' | 'end'): void {
+    if (!g.poiId || !g.grab) return
+    const w = this.toWorld(sx, sy)
+    const d = snapStep(e)
+    this.hooks.onPoiMove(g.poiId, snapTo(w.x + g.grab.x, d), snapTo(w.y + g.grab.y, d), phase)
+  }
+
   private editDrag(g: NonNullable<MapView['gesture']>, sx: number, sy: number, phase: 'move' | 'end', shift: boolean): void {
     const meta = this.profile?.image
     if (!meta) return
@@ -683,7 +728,7 @@ export class MapView {
     const g = this.gesture
     const crop = g?.mode === 'crop' || g?.mode === 'imgxf' ? g.crop! : g ? null : this.cropHit(sx, sy)
     const vcur = isVectorTool(this.tool) ? this.vec.cursorFor(this.tool, sx, sy) : null
-    this.el.style.cursor = this.spaceDown || g?.mode === 'pan' ? (g?.moved ? 'grabbing' : 'grab') : crop ? CROP_CURSOR[crop] : (vcur ?? (this.hoverPoi && this.tool === 'pan' ? 'pointer' : ''))
+    this.el.style.cursor = this.spaceDown || g?.mode === 'pan' ? (g?.moved ? 'grabbing' : 'grab') : crop ? CROP_CURSOR[crop] : (vcur ?? (g?.mode === 'poi' ? 'grabbing' : this.hoverPoi && this.tool === 'pmove' ? 'move' : this.hoverPoi && this.tool === 'pan' ? 'pointer' : ''))
     this.renderReadout()
     this.invalidate()
   }
@@ -1003,6 +1048,27 @@ export class MapView {
       pt.id === this.hoverPoi?.id ? 0 : pt.id === this.selectedId ? 1 : this.chat?.dest && pt.x === this.chat.dest.x && pt.y === this.chat.dest.y ? 2 : 3
     const ordered = [...visible].sort((a, b) => priority(a) - priority(b))
 
+    // Moved places: a hollow ring where the lorebook puts them, joined to where they are now.
+    // All of them while moving places, otherwise only the selected one.
+    g.save()
+    g.setLineDash([3, 3])
+    g.lineWidth = 1.2
+    for (const pt of visible) {
+      if (!pt.origin || (this.tool !== 'pmove' && pt.id !== this.selectedId)) continue
+      const o = this.toScreen(pt.origin.x, pt.origin.y)
+      const s = this.toScreen(pt.x, pt.y)
+      g.strokeStyle = t.muted
+      g.globalAlpha = 0.85
+      g.beginPath()
+      g.moveTo(o.x, o.y)
+      g.lineTo(s.x, s.y)
+      g.stroke()
+      g.beginPath()
+      g.arc(o.x, o.y, 4, 0, Math.PI * 2)
+      g.stroke()
+    }
+    g.restore()
+
     for (const pt of visible) {
       const s = this.toScreen(pt.x, pt.y)
       if (s.x < -10 || s.y < -10 || s.x > this.w + 10 || s.y > this.hgt + 10) continue
@@ -1241,3 +1307,13 @@ export class MapView {
   }
 }
 
+/** Drag/nudge granularity, matching the number fields: 1 unit, Shift 10, Alt 0.1, Ctrl+Alt 0.01. */
+function snapStep(e: { shiftKey: boolean; altKey: boolean; ctrlKey: boolean; metaKey: boolean }): number {
+  if (e.altKey) return e.ctrlKey || e.metaKey ? 0.01 : 0.1
+  return e.shiftKey ? 10 : 1
+}
+
+function snapTo(v: number, step: number): number {
+  const r = Math.round(v / step) * step
+  return step >= 1 ? r : Number(r.toFixed(Math.ceil(-Math.log10(step))))
+}

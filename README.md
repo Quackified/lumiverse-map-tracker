@@ -87,6 +87,24 @@ Markdown version of the same thing:
 - **Undo / Redo:** Ctrl+Z and Ctrl+Shift+Z (or the toolbar arrows) undo edits to points, zones, bounds, crop and pins. A drag or a scrub counts as one step.
 - **Export JSON / Import JSON** (Import tab) moves a map between installs. The file holds points, zones, crop and calibration but not the image. After importing, upload the image; if its size matches, the crop and calibration apply automatically.
 
+## Moving places
+
+The lorebook gathers your places; the map owns where they are.
+
+- **Move places** (toolbar, or **Move** in the Points tab): drag a place to its spot. Positions snap to whole units; hold Shift for 10 or Alt for 0.1. The arrow keys nudge the selected place with the same modifiers. Every move can be undone.
+- A moved place remembers where the lorebook put it. While moving places, a hollow ring and a dashed line show that position. The Points tab counts moved places, can list only those, and reverts one (**Revert** in its editor, or right-click > **Back to lorebook position**) or all of them.
+- Re-importing from the lorebook refreshes names, groups and notes but keeps moved places where you put them. Their lorebook position updates to the new import.
+
+### Lorebook variable
+
+Turn on **Lorebook variable** in the Points tab to publish every place's coordinates to one global variable (default `<map name>_places`, e.g. `endwright_places`). It holds `{"shackle-city": "(-20, 60)", ...}` and updates whenever a place moves. A lorebook entry reads a place with:
+
+```
+Shackle City {{getgvarkey::endwright_places::shackle-city}} sits on the trade road.
+```
+
+Lumiverse fills that in when the entry is injected into the prompt, so entries stay current without being rewritten. These are built-in macros, so they still work with Map Tracker disabled (the last published value stays). **Copy reference** on a place copies its exact macro.
+
 ## Map layers (shapes)
 
 Draw the world itself in world coordinates, so the map conforms to your data instead of to a picture. Open the **Layers** tab.

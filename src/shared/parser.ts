@@ -1,4 +1,5 @@
 import { boundsOf } from './geo'
+import { carryMoves } from './places'
 import type { Poi, Span, WorldProfile, Zone } from './types'
 
 // Infers points and zones from loosely structured coordinate notes. Both plain
@@ -288,14 +289,16 @@ function inferWithin(zones: Zone[], paths: Map<string, string>): void {
 export function mergeInto(profile: WorldProfile, parsed: ParseResult, mode: 'replace' | 'merge'): WorldProfile {
   const next: WorldProfile = { ...profile, updatedAt: Date.now() }
   if (mode === 'replace') {
-    next.points = parsed.points
+    next.points = carryMoves(profile.points, parsed.points)
     next.zones = parsed.zones
   } else {
     const key = (o: { name: string; group: string }) => `${o.group}\u0000${o.name}`.toLowerCase()
     const pts = new Map(profile.points.map((p) => [key(p), p]))
     for (const p of parsed.points) {
       const old = pts.get(key(p))
-      pts.set(key(p), old ? { ...old, x: p.x, y: p.y, note: p.note ?? old.note } : p)
+      if (!old) pts.set(key(p), p)
+      else if (old.origin) pts.set(key(p), carryMoves([old], [{ ...old, x: p.x, y: p.y, note: p.note ?? old.note }])[0])
+      else pts.set(key(p), { ...old, x: p.x, y: p.y, note: p.note ?? old.note })
     }
     const zs = new Map(profile.zones.map((z) => [key(z), z]))
     const idMap = new Map<string, string>()

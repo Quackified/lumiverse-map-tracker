@@ -1,6 +1,7 @@
 import type { ChatMessageDTO, LlmMessageDTO } from 'lumiverse-spindle-types'
 import { boundsOf, buildContext, calibrationForBounds, findPosTag, normalizeCalib } from './shared/geo'
 import { newProfile, slug } from './shared/parser'
+import { VAR_NAME_RE, placesVarValue } from './shared/places'
 import {
   DEFAULT_SETTINGS,
   type BackendMessage,
@@ -132,6 +133,7 @@ function sanitizeProfile(p: WorldProfile): WorldProfile {
     unitKm: num(p.unitKm, 1) > 0 ? num(p.unitKm, 1) : 1,
     points: (p.points ?? []).filter((pt) => Number.isFinite(pt.x) && Number.isFinite(pt.y)),
     zones: p.zones ?? [],
+    placesVar: typeof p.placesVar === 'string' && VAR_NAME_RE.test(p.placesVar) ? p.placesVar : undefined,
     updatedAt: Date.now(),
   }
   const b = p.bounds
@@ -142,7 +144,25 @@ function sanitizeProfile(p: WorldProfile): WorldProfile {
 async function saveProfile(p: WorldProfile, userId?: string): Promise<WorldProfile> {
   const clean = sanitizeProfile(p)
   await writeJson(profilePath(clean.id), clean, userId)
+  await publishPlaces(clean, userId)
   return clean
+}
+
+// Last value written per variable, so saves that don't move places don't rewrite it.
+const publishedPlaces = new Map<string, string>()
+
+/** Write the map's place coordinates to its global variable, read by lorebook entries via {{getgvarkey}}. */
+async function publishPlaces(p: WorldProfile, userId?: string): Promise<void> {
+  if (!p.placesVar) return
+  const value = placesVarValue(p.points)
+  const key = `${userId ?? ''}:${p.placesVar}`
+  if (publishedPlaces.get(key) === value) return
+  try {
+    await spindle.variables.global.set(p.placesVar, value, userId)
+    publishedPlaces.set(key, value)
+  } catch (err) {
+    spindle.log.warn(`[Map Tracker] Could not write the ${p.placesVar} variable: ${String(err)}`)
+  }
 }
 
 async function uniqueProfileId(name: string, userId?: string): Promise<string> {

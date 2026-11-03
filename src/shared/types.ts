@@ -12,6 +12,8 @@ export interface Poi {
   note?: string
   color?: string
   hidden?: boolean
+  /** Where the lorebook/import put this place, set once it has been moved on the map. */
+  origin?: { x: number; y: number }
 }
 
 /** One axis of a zone. `null` means open on that side (e.g. "Y>150" → { min: 150, max: null }). */
@@ -140,6 +142,8 @@ export interface WorldProfile {
   image?: MapImageMeta
   /** Crop/calibration from an imported map file, applied when an image of the same size is uploaded. */
   imageTemplate?: MapImageMeta
+  /** Global variable the place coordinates are published to (e.g. "endwright_places"). Unset = off. */
+  placesVar?: string
   /** The raw coordinate text this profile was last imported from. */
   source?: string
   updatedAt: number

@@ -20,9 +20,31 @@ Works with any world. You give it coordinate notes; it infers the points and zon
 4. **Image** tab (optional): upload a map picture, crop it, calibrate it.
 5. **Chat** tab: set your position and, if you like, a destination.
 
+## Map fields in lorebook entries (preferred)
+
+When lorebook entries carry structured map data in `extensions.map`, the **Import** tab offers **Use map data** for the whole lorebook. A lorebook export (`.json`) with map fields also works through **Import JSON**. The format follows GeoJSON ordering, x first:
+
+```yaml
+map:
+  kind: point                    # point | region | system
+  coords: [60, 50]               # point: [x, y]
+  bbox: [-35, -25, 100, 100]     # region: [minX, minY, maxX, maxY]; null = open side
+  priority: 1                    # region overlap: higher wins (default 0)
+  continent: Aldermere           # region is clipped to this continent
+  places:                        # named points inside this entry
+    - name: Royal Capital Auston
+      coords: [15, -5]
+```
+
+- **system** (one entry): `scale_km` sets the scale, and `regions` become the continents.
+- **region**: becomes a zone. Its `places` become points.
+- **point**: its `places` become points grouped under the entry. Its own `coords` is added as a point only when no place already sits there.
+- A place listed by several entries is kept once, under its location or faction entry. Same-spot names like "Bluewatch" and "Bluewatch Village" merge.
+- Entries without `map` are skipped. The text parser below is the fallback for lorebooks without map fields.
+
 ## Coordinate notes format
 
-Paste a whole lorebook entry; anything that isn't recognised is ignored.
+Paste a whole lorebook entry; anything that isn't recognised is ignored. Plain indented notes and Markdown entries both work.
 
 ```
 Eastern Continent (Aldermere):
@@ -38,20 +60,40 @@ Western Continent Terrain Zones:
 Scale: 1 coordinate unit = 50 km
 ```
 
+Markdown version of the same thing:
+
+```
+## Eastern Continent                                 ← headings build groups too
+**Golden Sail Republic**:                            ← a bold label groups the list under it
+* Thousand Sails (40, 40)                            ← [x,y] or (x, y)
+* Bluewatch Village (60, 50), southeast coast        ← text after the coordinate is the note
+* Peach Blossom Haven: Jade Pool (-320, 0), Entrance Settlement (-280, -80)
+**Continents**:                                      ← items under "Continents" become regions
+* **Eastern Continent (Aldermere)**: X[-180,170], Y[-150,200]. Ancient history.
+**Eastern regions by coordinate**:
+* when Y > 150, **Frostfall Tundra**.                ← the bold text names the zone
+* **Scale**: 1 unit = 50 km.
+```
+
 - +X is east and +Y is north.
-- Zones under a group whose name mentions a region (here "Western Continent …") are clipped to that region. For other zones, set **Clip to** in the Zones tab. Otherwise an open-ended zone like `Y>150` covers every continent.
-- When zones overlap, the higher **priority** wins, and ties go to the smaller zone.
+- Zones under a heading or group whose name mentions a region (here "Western Continent …", or "Eastern Continent" for "Aldermere") are clipped to that region. For other zones, set **Clip to** in the Zones tab. Otherwise an open-ended zone like `Y>150` covers every continent.
+- When zones overlap, the higher **priority** wins, and ties go to the smaller zone. A zone whose note says it "overrides" another gets priority 1.
 
 ## Map image
 
-- **Crop:** type pixel values, or use **Drag on map** to cut away legends, frames and printed rulers.
-- **Calibration:** two reference points per axis, so X and Y can have different scales. Click **Pick**, click a spot whose real coordinate you know (ruler ticks are ideal), then type its world value.
+- **Crop:** click **Edit crop** and drag the corner or edge handles on the map; drag inside the box to move it. The rest of the picture stays visible, dimmed.
+- **Placement:** two pins tie the picture to your coordinates. Click **Edit pins**, then drag pin **A** onto a coordinate you know (usually the origin; **Pick origin** sets A to 0,0 and lets you click where it is) and pin **B** onto a second known place. **Use a place…** fills a pin's coordinate from one of your points. While you edit, the picture holds still and the grid and points move, so you can see them line up.
+  - **Keep aspect ratio** (on by default) uses one scale for both axes. Turn it off when the picture is stretched, so X and Y scale separately.
+  - On the map, **Shift+drag** slides the whole grid and **Shift+wheel** scales it around the cursor.
+- **Number fields:** Ctrl+drag changes the value by 1, Shift by 10, Ctrl+Shift by 100, Alt by 0.1 (Ctrl+Alt by 0.01). Whole steps snap to round numbers. The arrow keys use the same modifiers.
+- **Undo / Redo:** Ctrl+Z and Ctrl+Shift+Z (or the toolbar arrows) undo edits to points, zones, bounds, crop and pins. A drag or a scrub counts as one step.
 - **Export JSON / Import JSON** (Import tab) moves a map between installs. The file holds points, zones, crop and calibration but not the image. After importing, upload the image; if its size matches, the crop and calibration apply automatically.
 
 ## The window
 
 - It's a floating overlay you can drag and resize.
-- **Snap layouts:** drag the title bar to a screen edge or corner (a preview shows the target), or use the layout button for halves, thirds, two-thirds, quarters or maximised. Snapped windows re-fit when the browser resizes. Double-click the title bar to maximise or restore.
+- **Snap layouts:** drag the title bar to a screen edge or corner (a preview shows the target), or use the layout button for halves, thirds, two-thirds, quarters or maximised. Double-click the title bar to maximise or restore.
+- **Keeps clear of the chat:** the free space on each side of the chat column works like its own screen, so snapped layouts fill that gap instead of covering the conversation, and they re-fit when the chat column moves. Turn off **Keep clear of the chat** in the layout menu to use the whole screen.
 - **Dock** moves the map into the sidebar tab; **Pop out** brings it back.
 - When the window is narrow, the side panel becomes an overlay toggled from the toolbar.
 

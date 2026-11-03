@@ -8,14 +8,17 @@ import {
   compass,
   findPosTag,
   formatKm,
+  calibrationForBounds,
   imageToWorld,
   locate,
   nearest,
+  normalizeCalib,
   worldToImage,
   zoneRect,
 } from '../src/shared/geo'
+import { entriesFromLorebookJson, parseMapEntries } from '../src/shared/mapext'
 import { mergeInto, newProfile, parseCoordinateText, parseSpans } from '../src/shared/parser'
-import type { Calibration, WorldProfile } from '../src/shared/types'
+import type { Calibration, LegacyCalibration, WorldProfile } from '../src/shared/types'
 
 const SAMPLE = `---
 title: '[LOC] Map Coordinates'
@@ -47,6 +50,45 @@ Western Continent Locations:
 Western Continent Terrain Zones:
   Dark Domain: X[-300,-230] AND Y>145
   Storm Mountains: Y>120 AND X[-400,-210]
+</map_coordinate>`
+
+// The same data written the way the vault's compressed lorebook entries are.
+const MARKDOWN = `<map_coordinate>
+
+## World Map Coordinates
+
+**Coordinate system**:
+* **Origin**: (0,0), centre of the Eastern Continent.
+* **Axes**: +X is east, +Y is north.
+* **Scale**: 1 unit = 50 km.
+
+**Continents**:
+* **Eastern Continent (Aldermere)**: X[-180,170], Y[-150,200]. Ancient history, mature magic and martial systems.
+* **Western Continent (Yanzhou)**: X[-400,-200]. Distinct cultures.
+
+## Eastern Continent
+
+**Golden Sail Republic**:
+* Capital City of Thousand Sails [40,40]
+* Bluewatch Village (60, 50), southeast coast near Thousand Sails
+
+**Eastern regions by coordinate**:
+* when Y > 150, **Frostfall Tundra**.
+* when X < -45 (west of the Dragonfang Mountains), **Western Wastes**.
+
+## Western Continent
+
+**Frostwinter Bloodline** (north):
+* Yao City [-220,-10]
+* Celestial Stairway [-220,135]
+
+**Shattered Heart Inland Sea**:
+* Peach Blossom Haven: Jade Pool (-320, 0), Entrance Settlement [-280,-80]
+
+**Western regions by coordinate**:
+* when X[-300,-230] and Y > 145, **Dark Domain**, beyond the Storm Mountains. This overrides Storm Mountains inside the box.
+* when Y > 120 and X[-400,-210], **Storm Mountains**.
+
 </map_coordinate>`
 
 function profileFrom(text: string): WorldProfile {
@@ -116,6 +158,56 @@ describe('parser', () => {
   })
 })
 
+describe('parser (markdown lorebook format)', () => {
+  const r = parseCoordinateText(MARKDOWN)
+  const zone = (name: string) => r.zones.find((z) => z.name === name)!
+
+  it('reads bullet points under bold labels and headings', () => {
+    expect(r.unitKm).toBe(50)
+    expect(r.points.map((p) => p.name)).toEqual([
+      'Capital City of Thousand Sails',
+      'Bluewatch Village',
+      'Yao City',
+      'Celestial Stairway',
+      'Jade Pool',
+      'Entrance Settlement',
+    ])
+    expect(r.points.find((p) => p.name === 'Bluewatch Village')).toMatchObject({
+      x: 60,
+      y: 50,
+      group: 'Eastern Continent / Golden Sail Republic',
+      note: 'southeast coast near Thousand Sails',
+    })
+  })
+
+  it('splits several points on one line and keeps the line label as a sub-group', () => {
+    expect(r.points.find((p) => p.name === 'Entrance Settlement')).toMatchObject({
+      x: -280,
+      y: -80,
+      group: 'Western Continent / Shattered Heart Inland Sea / Peach Blossom Haven',
+    })
+  })
+
+  it('turns the Continents list into regions with their traits as notes', () => {
+    expect(zone('Eastern Continent (Aldermere)')).toMatchObject({ kind: 'region', x: { min: -180, max: 170 }, note: 'Ancient history, mature magic and martial systems' })
+    expect(zone('Western Continent (Yanzhou)')).toMatchObject({ kind: 'region', y: { min: null, max: null } })
+  })
+
+  it('reads "when …, **Name**" zones and clips them to the heading continent', () => {
+    expect(zone('Frostfall Tundra')).toMatchObject({ kind: 'zone', y: { min: 150, max: null }, within: 'eastern-continent-aldermere' })
+    expect(zone('Western Wastes')).toMatchObject({ x: { min: null, max: -45 }, note: 'west of the Dragonfang Mountains', within: 'eastern-continent-aldermere' })
+    expect(zone('Dark Domain')).toMatchObject({ x: { min: -300, max: -230 }, y: { min: 145, max: null }, within: 'western-continent-yanzhou', priority: 1 })
+    expect(zone('Storm Mountains').note).toBeUndefined()
+  })
+
+  it('locates western points without eastern zones leaking in', () => {
+    const p = profileFrom(MARKDOWN)
+    expect(locate(p, -220, -10).zones).toEqual([])
+    expect(locate(p, -265, 165).zone?.name).toBe('Dark Domain')
+    expect(locate(p, -100, 170).zones.map((z) => z.name)).toEqual(['Frostfall Tundra', 'Western Wastes'])
+  })
+})
+
 describe('geo', () => {
   const p = profileFrom(SAMPLE)
 
@@ -150,8 +242,10 @@ describe('geo', () => {
     expect(formatKm(812.4)).toBe('812 km')
   })
 
-  it('maps image pixels with independent X and Y scales', () => {
-    const c: Calibration = { x1: { px: 329.5, w: -400 }, x2: { px: 3718.5, w: 100 }, y1: { px: 418.5, w: 150 }, y2: { px: 1900, w: -100 } }
+  it('maps image pixels with independent X and Y scales (pre-0.2 calibration upgraded)', () => {
+    const legacy: LegacyCalibration = { x1: { px: 329.5, w: -400 }, x2: { px: 3718.5, w: 100 }, y1: { px: 418.5, w: 150 }, y2: { px: 1900, w: -100 } }
+    const c = normalizeCalib(legacy)
+    expect(c.uniform).toBe(false)
     const w = imageToWorld(c, 3040.5, 1159.25)
     expect(w.x).toBeCloseTo(0, 1)
     expect(w.y).toBeCloseTo(25, 6)
@@ -162,6 +256,34 @@ describe('geo', () => {
     const again = imageToWorld(c, back.px, back.py)
     expect(again.x).toBeCloseTo(-280, 6)
     expect(again.y).toBeCloseTo(80, 6)
+  })
+
+  it('places the image from two pins with one scale', () => {
+    // Origin at pixel (1000, 500); Auston [15,-5] at pixel (1150, 550): 10 px per unit.
+    const c: Calibration = { a: { px: 1000, py: 500, x: 0, y: 0 }, b: { px: 1150, py: 550, x: 15, y: -5 }, uniform: true }
+    const s = Math.hypot(150, 50) / Math.hypot(15, -5)
+    expect(s).toBeCloseTo(10, 9)
+    expect(imageToWorld(c, 1000, 500)).toEqual({ x: 0, y: 0 })
+    const w = imageToWorld(c, 1100, 300)
+    expect(w.x).toBeCloseTo(10, 9)
+    expect(w.y).toBeCloseTo(20, 9)
+    const back = worldToImage(c, -280, 80)
+    expect(back.px).toBeCloseTo(1000 - 2800, 6)
+    expect(back.py).toBeCloseTo(500 - 800, 6)
+  })
+
+  it('fits a fresh image over the bounds with pin A on the origin', () => {
+    const c = calibrationForBounds(2000, 1000, { minX: -400, maxX: 200, minY: -150, maxY: 150 })
+    expect(c.uniform).toBe(true)
+    expect(c.a).toMatchObject({ x: 0, y: 0 })
+    const o = imageToWorld(c, c.a.px, c.a.py)
+    expect(o.x).toBeCloseTo(0, 1)
+    expect(o.y).toBeCloseTo(0, 1)
+    // The whole image spans the wider of the two bound ranges, aspect kept.
+    const tl = imageToWorld(c, 0, 0)
+    const br = imageToWorld(c, 2000, 1000)
+    expect(br.x - tl.x).toBeCloseTo(600, 1)
+    expect(tl.y - br.y).toBeCloseTo(300, 1)
   })
 
   it('builds the prompt context', () => {
@@ -181,5 +303,63 @@ describe('geo', () => {
     expect(findPosTag('<map-pos>1,2</map-pos> later <map-pos>[3, -4]</map-pos>')).toEqual({ x: 3, y: -4 })
     expect(findPosTag('<map-pos x="5" y="6"/>')).toEqual({ x: 5, y: 6 })
     expect(findPosTag('no tag')).toBeNull()
+  })
+})
+
+describe('map fields (extensions.map, Map Coordinate Format v1)', () => {
+  const lorebook = {
+    entries: [
+      {
+        comment: '[LOC] Map Coordinates',
+        extensions: {
+          map: {
+            kind: 'system',
+            origin: [0, 0],
+            scale_km: 50,
+            regions: [
+              { name: 'Aldermere', bbox: [-180, -150, 170, 200] },
+              { name: 'Yanzhou', bbox: [-400, null, -200, null] },
+            ],
+          },
+        },
+      },
+      { comment: '[HIST] The Dark Domain', extensions: { map: { kind: 'region', bbox: [-300, 145, -230, null], continent: 'Yanzhou', priority: 2, places: [{ name: 'Dark Domain Core', coords: [-265, 165] }] } } },
+      { comment: '[LOC] Western Continent: Storm Mountain', extensions: { map: { kind: 'region', bbox: [-400, 120, -210, null], continent: 'Yanzhou' } } },
+      { comment: '[LOC] Eastern Continent: Frostfall Tundra', extensions: { map: { kind: 'region', bbox: [null, 150, null, null], continent: 'Aldermere' } } },
+      {
+        comment: '[FAC] Golden Sail Republic',
+        extensions: { map: { kind: 'point', coords: [40, 40], continent: 'Aldermere', places: [{ name: 'Capital City of Thousand Sails', coords: [40, 40] }, { name: 'Bluewatch Village', coords: [60, 50] }] } },
+      },
+      { comment: '[LOC] Bluewatch', extensions: { map: { kind: 'point', coords: [60, 50], continent: 'Aldermere' } } },
+      { comment: '[EVENT] Harbour Festival', extensions: { map: { kind: 'point', coords: [40, 40], places: [{ name: 'Capital City of Thousand Sails', coords: [40, 40] }] } } },
+      { comment: '[CHAR] Nobody', content: 'no map here', extensions: {} },
+    ],
+  }
+  const r = parseMapEntries(entriesFromLorebookJson(lorebook)!)
+
+  it('reads the system entry: scale and continents', () => {
+    expect(r.unitKm).toBe(50)
+    expect(r.zones.filter((z) => z.kind === 'region').map((z) => z.name)).toEqual(['Aldermere', 'Yanzhou'])
+  })
+
+  it('turns bbox [minX, minY, maxX, maxY] with nulls into clipped, prioritised zones', () => {
+    const tundra = r.zones.find((z) => z.name === 'Frostfall Tundra')!
+    expect(tundra).toMatchObject({ kind: 'zone', x: { min: null, max: null }, y: { min: 150, max: null }, within: 'aldermere' })
+    expect(r.zones.find((z) => z.name === 'The Dark Domain')).toMatchObject({ priority: 2, within: 'yanzhou', x: { min: -300, max: -230 } })
+  })
+
+  it('lists places once, keeps the home entry as group, and merges same-spot name variants', () => {
+    expect(r.points.map((p) => p.name).sort()).toEqual(['Bluewatch Village', 'Capital City of Thousand Sails', 'Dark Domain Core'])
+    expect(r.points.find((p) => p.name === 'Capital City of Thousand Sails')!.group).toBe('Aldermere / Golden Sail Republic')
+    expect(r.skipped).toBe(1)
+  })
+
+  it('locates with the imported data', () => {
+    const p = mergeInto(newProfile('T', 't'), r, 'replace')
+    expect(locate(p, -265, 165).zone?.name).toBe('The Dark Domain')
+    expect(locate(p, -265, 165).region?.name).toBe('Yanzhou')
+    expect(locate(p, -250, 170).zones.map((z) => z.name)).toEqual(['The Dark Domain', 'Storm Mountain'])
+    expect(locate(p, 10, 160).zone?.name).toBe('Frostfall Tundra')
+    expect(locate(p, -300, 160).zones.some((z) => z.name === 'Frostfall Tundra')).toBe(false)
   })
 })

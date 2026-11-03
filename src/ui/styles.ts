@@ -67,8 +67,8 @@ export const CSS = `
 
 .mt-app { display: flex; flex-direction: column; flex: 1; width: 100%; height: 100%; min-width: 0; min-height: 0; }
 .mt-toolbar {
-  display: flex; align-items: center; gap: 6px; padding: 6px 8px; flex: none; overflow-x: auto;
-  border-bottom: 1px solid var(--mt-border); scrollbar-width: none;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 6px 8px; flex: none;
+  border-bottom: 1px solid var(--mt-border);
 }
 .mt-grid {
   position: relative; flex: 1; min-height: 0; display: grid;
@@ -197,9 +197,17 @@ textarea.mt-input { height: auto; padding: 6px 8px; resize: vertical; width: 100
 .mt-item-name { padding: 3px 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mt-dot { width: 9px; height: 9px; border-radius: 50%; }
 .mt-swatch { width: 11px; height: 11px; border: 2px dashed; border-radius: 2px; }
-.mt-calib-row { display: grid; grid-template-columns: 26px minmax(0, 1fr) minmax(0, 1fr) auto; gap: 6px; align-items: center; margin: 4px 0; }
-.mt-calib-row .mt-input { width: 100%; }
-.mt-calib-head { font-size: 11px; color: var(--mt-muted); margin-bottom: 0; }
+.mt-pin { margin: 8px 0; padding: 8px; border: 1px solid var(--mt-border); border-radius: 8px; background: var(--mt-fill-subtle); }
+.mt-pin.mt-on { border-color: var(--mt-primary); box-shadow: inset 0 0 0 1px var(--mt-primary); }
+.mt-pin-head { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; }
+.mt-pin-badge { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; font-size: 11px; font-weight: 700; color: #fff; }
+.mt-pin-a { background: var(--mt-primary); }
+.mt-pin-b { background: var(--mt-accent); color: #1a1a1a; }
+.mt-pin-px summary { cursor: pointer; font-size: 11.5px; margin-top: 4px; }
+.mt-pin-px .mt-form { margin-top: 6px; }
+.mt-scrubbing { cursor: ew-resize !important; outline: 1px solid var(--mt-primary); }
+.mt-picker-info { max-width: 214px; font-size: 11.5px; color: var(--mt-muted); margin-bottom: 8px; }
+.mt-picker-avoid { margin-top: 8px; font-size: 12px; }
 .mt-empty { text-align: center; padding: 26px 8px; }
 
 .mt-drawer-host { display: flex; flex-direction: column; height: 100%; min-height: 70vh; background: var(--mt-elev); }

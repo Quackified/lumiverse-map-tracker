@@ -1,4 +1,4 @@
-import type { Bounds, Calibration, ChatMapState, Poi, Settings, WorldProfile, Zone } from './types'
+import type { Bounds, CalibPin, Calibration, ChatMapState, LegacyCalibration, Poi, Settings, WorldProfile, Zone } from './types'
 
 const COMPASS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']
 
@@ -149,32 +149,74 @@ export interface AxisMap {
   b: number
 }
 
-export function axisMap(p1: { px: number; w: number }, p2: { px: number; w: number }): AxisMap {
-  const dp = p2.px - p1.px
-  const a = dp === 0 ? 1 : (p2.w - p1.w) / dp
-  return { a, b: p1.w - a * p1.px }
+/** Per-axis mapping from image pixels to world units (north up, no rotation). */
+export function calibMaps(c: Calibration): { mx: AxisMap; my: AxisMap } {
+  const { a, b } = c
+  const dpx = b.px - a.px
+  const dpy = b.py - a.py
+  const dx = b.x - a.x
+  const dy = b.y - a.y
+  const pd = Math.hypot(dpx, dpy)
+  const wd = Math.hypot(dx, dy)
+  const uni = pd > 1e-6 && wd > 1e-9 ? wd / pd : 1
+  let sx = uni
+  let sy = -uni
+  if (!c.uniform) {
+    const okX = Math.abs(dpx) > 1e-6 && Math.abs(dx) > 1e-9
+    const okY = Math.abs(dpy) > 1e-6 && Math.abs(dy) > 1e-9
+    // An axis the pins don't separate borrows the other axis' scale.
+    if (okX) sx = dx / dpx
+    if (okY) sy = dy / dpy
+    if (okX && !okY) sy = -Math.abs(sx)
+    if (okY && !okX) sx = Math.abs(sy)
+  }
+  return { mx: { a: sx, b: a.x - sx * a.px }, my: { a: sy, b: a.y - sy * a.py } }
 }
 
 export function imageToWorld(c: Calibration, px: number, py: number): { x: number; y: number } {
-  const mx = axisMap(c.x1, c.x2)
-  const my = axisMap(c.y1, c.y2)
+  const { mx, my } = calibMaps(c)
   return { x: mx.a * px + mx.b, y: my.a * py + my.b }
 }
 
 export function worldToImage(c: Calibration, x: number, y: number): { px: number; py: number } {
-  const mx = axisMap(c.x1, c.x2)
-  const my = axisMap(c.y1, c.y2)
+  const { mx, my } = calibMaps(c)
   return { px: (x - mx.b) / mx.a, py: (y - my.b) / my.a }
 }
 
-/** Calibration that stretches the whole image over the given bounds (north up). */
+const r2 = (n: number) => Math.round(n * 100) / 100
+
+/**
+ * Fits the whole image over the bounds, keeping its aspect ratio. Pin a sits on
+ * the world origin, pin b on the image's bottom-right corner.
+ */
 export function calibrationForBounds(width: number, height: number, b: Bounds): Calibration {
+  const s = Math.max((b.maxX - b.minX) / width, (b.maxY - b.minY) / height) || 1
+  const cx = (b.minX + b.maxX) / 2
+  const cy = (b.minY + b.maxY) / 2
+  const toPx = (x: number, y: number) => ({ px: r2((x - cx) / s + width / 2), py: r2(height / 2 - (y - cy) / s) })
   return {
-    x1: { px: 0, w: b.minX },
-    x2: { px: width, w: b.maxX },
-    y1: { px: 0, w: b.maxY },
-    y2: { px: height, w: b.minY },
+    a: { ...toPx(0, 0), x: 0, y: 0 },
+    b: { px: width, py: height, x: r2(cx + (s * width) / 2), y: r2(cy - (s * height) / 2) },
+    uniform: true,
   }
+}
+
+/** Accepts the current pin format or the pre-0.2 per-axis anchors. */
+export function normalizeCalib(c: unknown, width = 1000, height = 1000, bounds?: Bounds): Calibration {
+  const o = c as Partial<Calibration & LegacyCalibration> | null | undefined
+  const pin = (p: Partial<CalibPin> | undefined): CalibPin | null =>
+    p && [p.px, p.py, p.x, p.y].every((v) => typeof v === 'number' && Number.isFinite(v)) ? (p as CalibPin) : null
+  const a = pin(o?.a)
+  const b = pin(o?.b)
+  if (a && b) return { a: { ...a }, b: { ...b }, uniform: !!o!.uniform }
+  if (o?.x1 && o.x2 && o.y1 && o.y2) {
+    return {
+      a: { px: o.x1.px, py: o.y1.px, x: o.x1.w, y: o.y1.w },
+      b: { px: o.x2.px, py: o.y2.px, x: o.x2.w, y: o.y2.w },
+      uniform: false,
+    }
+  }
+  return calibrationForBounds(width, height, bounds ?? { minX: -100, maxX: 100, minY: -100, maxY: 100 })
 }
 
 // ── Prompt context ──────────────────────────────────────────────────────────

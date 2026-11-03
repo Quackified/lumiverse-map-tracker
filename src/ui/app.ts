@@ -1,19 +1,23 @@
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types'
-import { bearing, boundsOf, calibrationForBounds, compass, distanceUnits, formatCoord, formatKm, locate } from '../shared/geo'
+import { bearing, boundsOf, calibMaps, calibrationForBounds, compass, distanceUnits, formatCoord, formatKm, imageToWorld, locate, normalizeCalib } from '../shared/geo'
+import { entriesFromLorebookJson, hasMapData, parseMapEntries } from '../shared/mapext'
 import { mergeInto, newProfile, parseCoordinateText, slug, type ParseResult } from '../shared/parser'
 import type {
   BackendMessage,
   Bounds,
-  Calibration,
+  CalibPin,
   FrontendMessage,
+  MapImageMeta,
   InjectMode,
   Poi,
   StatePayload,
+  WorldBookEntryLite,
   WorldProfile,
   Zone,
 } from '../shared/types'
-import { clear, debounce, h, hueOf, icon, numOrNull } from './dom'
-import { MapView, type Layers, type Tool } from './viewport'
+import { clear, debounce, enableScrub, h, hueOf, icon, numOrNull } from './dom'
+import { History } from './history'
+import { MapView, type Layers, type PinKey, type Tool } from './viewport'
 
 type Tab = 'chat' | 'points' | 'zones' | 'import' | 'image' | 'map'
 
@@ -31,9 +35,9 @@ const TOOL_HINT: Partial<Record<Tool, string>> = {
   dest: 'Click the map to set the destination (snaps to points).',
   add: 'Click the map to add a point.',
   measure: 'Click two spots to measure. Esc to clear.',
-  crop: 'Drag over the image to crop it.',
+  crop: 'Drag the corners or edges to crop; drag inside to move the box. Esc when done.',
   zone: 'Drag a rectangle to create a zone.',
-  calib: 'Click a spot whose real coordinate you know.',
+  calib: 'Drag pin A / B onto their spots (a click moves the active pin). Shift+drag slides the grid, Shift+wheel scales it.',
 }
 
 const UI_KEY = 'map_tracker.ui'
@@ -54,6 +58,16 @@ function loadUi(): Partial<UiPrefs> {
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100
+}
+
+/** Profiles from an older backend may still carry per-axis calibration. */
+function withPins(p: WorldProfile | null): WorldProfile | null {
+  if (!p) return p
+  for (const key of ['image', 'imageTemplate'] as const) {
+    const m = p[key]
+    if (m) p[key] = { ...m, calib: normalizeCalib(m.calib, m.width, m.height, p.bounds) }
+  }
+  return p
 }
 
 export class MapApp {
@@ -77,13 +91,17 @@ export class MapApp {
   private sideDirty = false
   private editingPoi: string | null = null
   private editingZone: string | null = null
-  private calibTarget: keyof Calibration | null = null
+  private history = new History()
+  private undoBtn!: HTMLButtonElement
+  private redoBtn!: HTMLButtonElement
+  /** Groups a run of edits (a drag, a scrub) into one undo step. */
+  private editGroup: string | null = null
   private pointFilter = ''
   private importText = ''
   private importMode: 'merge' | 'replace' | 'new' = 'merge'
   private importPreview: ParseResult | null = null
   private books: { id: string; name: string }[] = []
-  private entries: { id: string; name: string; content: string }[] = []
+  private entries: WorldBookEntryLite[] = []
   private ro: ResizeObserver
   private pendingSave = false
   private flushSave = debounce(() => {
@@ -108,6 +126,8 @@ export class MapApp {
         onSelectPoi: (poi) => this.onSelectPoi(poi),
         onContextMenu: (x, y, poi, cx, cy) => this.openMenu(x, y, poi, cx, cy),
         onToolDone: () => this.setTool('pan'),
+        onImageEdit: (patch, phase) => this.onImageEdit(patch, phase),
+        onActivePin: (pin) => this.onActivePin(pin),
       },
       rulerX,
       rulerY,
@@ -162,7 +182,60 @@ export class MapApp {
     this.ro.observe(this.el)
 
     document.addEventListener('pointerdown', this.onDocPointer, true)
+    this.el.addEventListener('keydown', (e) => this.onKey(e))
+    enableScrub(this.el, {
+      onStart: () => (this.editGroup = `scrub-${Date.now()}`),
+      onEnd: () => {
+        this.editGroup = null
+        if (this.sideDirty) this.renderSide(true)
+      },
+    })
     this.render()
+  }
+
+  private onKey(e: KeyboardEvent): void {
+    const mod = e.ctrlKey || e.metaKey
+    if (!mod) return
+    const t = e.target as HTMLElement
+    // Text fields keep their own undo.
+    if (t.matches('textarea, input:not([type=checkbox]):not([type=radio]):not([type=range]), select')) return
+    const k = e.key.toLowerCase()
+    if (k === 'z' && !e.shiftKey) this.undo()
+    else if ((k === 'z' && e.shiftKey) || k === 'y') this.redo()
+    else return
+    e.preventDefault()
+    e.stopPropagation()
+  }
+
+  private undo(): void {
+    this.flushSave.flush()
+    const prev = this.profile && this.history.undo(this.profile)
+    if (prev) this.restore(prev)
+  }
+
+  private redo(): void {
+    const next = this.profile && this.history.redo(this.profile)
+    if (next) this.restore(next)
+  }
+
+  /** Put back a snapshot, keeping the current image bytes' metadata when the image changed since. */
+  private restore(snap: WorldProfile): void {
+    const cur = this.profile!
+    const next = structuredClone(snap)
+    if (!(snap.image && cur.image && snap.image.rev === cur.image.rev)) next.image = cur.image && structuredClone(cur.image)
+    next.updatedAt = Date.now()
+    this.profile = next
+    this.map.setProfile(next)
+    this.pendingSave = true
+    this.flushSave()
+    this.renderSide(true)
+    this.renderStatus()
+    this.renderHistory()
+  }
+
+  private renderHistory(): void {
+    this.undoBtn.disabled = !this.history.canUndo()
+    this.redoBtn.disabled = !this.history.canRedo()
   }
 
   /** Re-read theme colours (after a theme switch or when the map is re-shown). */
@@ -201,7 +274,8 @@ export class MapApp {
     switch (msg.type) {
       case 'state':
         this.state = msg
-        if (!this.pendingSave || msg.profile?.id !== this.profile?.id) this.profile = msg.profile
+        if (msg.profile?.id !== this.profile?.id) this.history.clear()
+        if (!this.pendingSave || msg.profile?.id !== this.profile?.id) this.profile = withPins(msg.profile)
         this.map.setProfile(this.profile)
         this.map.setChat(msg.chat)
         this.syncImage()
@@ -244,9 +318,10 @@ export class MapApp {
     if (p?.image) this.send({ type: 'getImage', profileId: p.id })
   }
 
-  /** Apply a local edit, redraw, and save (debounced). */
-  private mutate(fn: (p: WorldProfile) => void, rerenderSide = true): void {
+  /** Apply a local edit, redraw, and save (debounced). Edits sharing `group` undo as one step. */
+  private mutate(fn: (p: WorldProfile) => void, rerenderSide = true, group: string | null = this.editGroup): void {
     if (!this.profile) return
+    this.history.record(this.profile, group)
     const next: WorldProfile = structuredClone(this.profile)
     fn(next)
     next.updatedAt = Date.now()
@@ -256,11 +331,25 @@ export class MapApp {
     this.flushSave()
     if (rerenderSide) this.renderSide()
     this.renderStatus()
+    this.renderHistory()
+  }
+
+  private onImageEdit(patch: Partial<Pick<MapImageMeta, 'crop' | 'calib'>>, phase: 'move' | 'end'): void {
+    if (!this.profile?.image) return
+    this.editGroup ??= `image-${Date.now()}`
+    this.mutate((p) => Object.assign(p.image!, structuredClone(patch)), phase === 'end')
+    if (phase === 'end') this.editGroup = null
+  }
+
+  private onActivePin(pin: PinKey): void {
+    this.activatePin(pin, false)
   }
 
   // ── Toolbar ───────────────────────────────────────────────────────────────
 
   private buildToolbar(): HTMLDivElement {
+    this.undoBtn = h('button', { class: 'mt-btn', title: 'Undo (Ctrl+Z)', disabled: true, onclick: () => this.undo() }, icon('undo'))
+    this.redoBtn = h('button', { class: 'mt-btn', title: 'Redo (Ctrl+Shift+Z)', disabled: true, onclick: () => this.redo() }, icon('redo'))
     const toolBtn = (t: Tool, ico: Parameters<typeof icon>[0], title: string) => {
       const b = h('button', { class: 'mt-btn mt-tool', title, onclick: () => this.setTool(this.map.tool === t ? 'pan' : t) }, icon(ico))
       this.toolButtons.set(t, b)
@@ -279,6 +368,7 @@ export class MapApp {
         toolBtn('add', 'pin', 'Add point'),
         toolBtn('measure', 'ruler', 'Measure distance'),
       ),
+      h('div', { class: 'mt-seg' }, this.undoBtn, this.redoBtn),
       h('div', { class: 'mt-spacer' }),
       h('button', { class: 'mt-btn mt-layers-btn', title: 'Layers', onclick: () => (this.layersPop.hidden = !this.layersPop.hidden) }, icon('layers')),
       h(
@@ -324,13 +414,14 @@ export class MapApp {
   }
 
   private setTool(t: Tool): void {
+    const prev = this.map.tool
     this.map.setTool(t)
-    if (t !== 'calib') this.calibTarget = null
     for (const [tool, b] of this.toolButtons) b.classList.toggle('mt-on', tool === t)
     const hint = TOOL_HINT[t]
     this.hint.hidden = !hint
     this.hint.textContent = hint ?? ''
-    if (t === 'crop' || t === 'zone' || t === 'calib') this.renderSide()
+    const panelTools: Tool[] = ['crop', 'zone', 'calib']
+    if (panelTools.includes(t) || panelTools.includes(prev)) this.renderSide()
   }
 
   private isSideShown(): boolean {
@@ -392,25 +483,11 @@ export class MapApp {
       this.editingPoi = id
       this.setTool('pan')
       this.openTab('points')
-    } else if (tool === 'calib' && this.calibTarget && this.profile?.image) {
-      const ip = this.map.imagePixelAt(x, y)
-      const target = this.calibTarget
-      if (ip) {
-        const value = target.startsWith('x') ? ip.px : ip.py
-        this.mutate((p) => {
-          p.image!.calib[target].px = Math.round(value * 10) / 10
-        })
-      }
-      this.setTool('pan')
     }
   }
 
   private onRect(tool: Tool, r: Bounds): void {
-    if (tool === 'crop') {
-      const rect = this.map.imageRectFromWorld(r)
-      if (rect) this.mutate((p) => (p.image!.crop = rect))
-      this.setTool('pan')
-    } else if (tool === 'zone') {
+    if (tool === 'zone') {
       const id = `zone-${Date.now().toString(36)}`
       const rd = (v: number) => Math.round(v)
       this.mutate(
@@ -943,7 +1020,7 @@ export class MapApp {
           },
           'Preview',
         ),
-        h('button', { class: 'mt-btn mt-primary', onclick: () => this.applyImport(), disabled: !this.importText.trim() }, 'Apply'),
+        h('button', { class: 'mt-btn mt-primary', onclick: () => this.applyImport(), disabled: !this.importText.trim() && !this.importPreview }, 'Apply'),
       ),
     )
     const pv = this.importPreview
@@ -954,7 +1031,7 @@ export class MapApp {
           { class: 'mt-preview' },
           h('b', null, `${pv.points.length} points · ${pv.zones.length} zones`),
           pv.unitKm ? ` · 1 unit = ${pv.unitKm} km` : '',
-          pv.skipped ? h('span', { class: 'mt-dim' }, ` · ${pv.skipped} lines ignored`) : '',
+          pv.skipped ? h('span', { class: 'mt-dim' }, ` · ${pv.skipped} skipped`) : '',
           h('ul', null, ...pv.zones.slice(0, 6).map((z) => h('li', null, `${z.kind === 'region' ? 'Region' : 'Zone'}: ${z.name}`)), ...pv.points.slice(0, 6).map((pt) => h('li', null, `${pt.name} ${formatCoord(pt.x, pt.y)}`))),
         ),
       )
@@ -968,6 +1045,34 @@ export class MapApp {
       for (const b of this.books) bookSel.append(h('option', { value: b.id }, b.name))
       bookSel.addEventListener('change', () => bookSel.value && this.send({ type: 'listWorldBookEntries', bookId: bookSel.value }))
       body.append(h('div', { class: 'mt-row' }, h('button', { class: 'mt-btn', onclick: () => this.send({ type: 'listWorldBooks' }) }, 'Load lorebooks'), bookSel))
+      const mapped = this.entries.filter((e) => e.map)
+      if (mapped.length) {
+        body.append(
+          h(
+            'div',
+            { class: 'mt-preview' },
+            h('b', null, `${mapped.length} entries carry map data`),
+            h('div', { class: 'mt-dim' }, 'Points, regions and continents from each entry’s map field. Preferred over reading entry text.'),
+            h(
+              'div',
+              { class: 'mt-row' },
+              h(
+                'button',
+                {
+                  class: 'mt-btn mt-primary',
+                  onclick: () => {
+                    this.importText = ''
+                    this.importPreview = parseMapEntries(mapped)
+                    if (this.profile && this.importMode === 'merge') this.importMode = 'replace'
+                    this.renderSide(true)
+                  },
+                },
+                'Use map data',
+              ),
+            ),
+          ),
+        )
+      }
       if (this.entries.length) {
         const entrySel = h('select', { class: 'mt-select mt-grow' }, h('option', { value: '' }, `${this.entries.length} entries with coordinates…`))
         for (const e of this.entries) entrySel.append(h('option', { value: e.id }, e.name))
@@ -990,7 +1095,7 @@ export class MapApp {
         h('button', { class: 'mt-btn', onclick: () => this.exportProfile(), disabled: !p }, 'Export JSON'),
         h('button', { class: 'mt-btn', onclick: () => void this.importProfileFile() }, 'Import JSON'),
       ),
-      h('div', { class: 'mt-dim' }, 'The JSON holds points, zones, crop and calibration. The image is uploaded separately.'),
+      h('div', { class: 'mt-dim' }, 'A map file holds points, zones, crop and calibration (the image is uploaded separately). A lorebook export with map fields works too.'),
     )
   }
 
@@ -1003,7 +1108,9 @@ export class MapApp {
       this.send({ type: 'importProfile', profile })
     } else {
       const next = mergeInto(this.profile, parsed, this.importMode)
+      this.history.record(this.profile)
       this.profile = next
+      this.renderHistory()
       this.pendingSave = true
       this.flushSave()
       this.flushSave.flush()
@@ -1032,7 +1139,16 @@ export class MapApp {
     if (!f) return
     try {
       const data = JSON.parse(new TextDecoder().decode(f.bytes)) as WorldProfile
-      if (!Array.isArray(data.points) || !Array.isArray(data.zones)) throw new Error('Not a map file')
+      // A lorebook export with map fields: preview it like a pasted import.
+      const lore = entriesFromLorebookJson(data)
+      if (lore && hasMapData(lore)) {
+        this.importText = ''
+        this.importPreview = parseMapEntries(lore)
+        this.tab = 'import'
+        this.renderSide(true)
+        return
+      }
+      if (!Array.isArray(data.points) || !Array.isArray(data.zones)) throw new Error('Not a map file or a lorebook with map data')
       this.send({ type: 'importProfile', profile: { ...data, bounds: data.bounds ?? boundsOf(data) } })
     } catch (err) {
       this.warn(`Could not read that file: ${err instanceof Error ? err.message : String(err)}`)
@@ -1057,7 +1173,7 @@ export class MapApp {
       return
     }
     const opacity = h('input', { type: 'range', min: '0.1', max: '1', step: '0.05', value: String(meta.opacity), class: 'mt-grow' })
-    opacity.addEventListener('input', () => this.mutate((d) => (d.image!.opacity = Number(opacity.value)), false))
+    opacity.addEventListener('input', () => this.mutate((d) => (d.image!.opacity = Number(opacity.value)), false, 'opacity'))
     body.append(
       h('div', { class: 'mt-dim' }, `${meta.width} × ${meta.height} px`),
       h(
@@ -1070,80 +1186,138 @@ export class MapApp {
     )
 
     // Crop
+    const cropping = this.map.tool === 'crop'
     const cropIn = (k: 'x' | 'y' | 'w' | 'h') => {
-      const el = h('input', { class: 'mt-input', type: 'number', step: '1', value: String(meta.crop[k]) })
+      const el = h('input', { class: 'mt-input', type: 'number', step: '1', min: '0', value: String(meta.crop[k]) })
       el.addEventListener('change', () => {
         const v = numOrNull(el.value)
         if (v === null) return
         this.mutate((d) => {
-          const c = d.image!.crop
+          const im = d.image!
+          const c = im.crop
           c[k] = Math.max(0, Math.round(v))
-          c.w = Math.max(1, Math.min(c.w, d.image!.width - c.x))
-          c.h = Math.max(1, Math.min(c.h, d.image!.height - c.y))
-        })
+          c.x = Math.min(c.x, im.width - 1)
+          c.y = Math.min(c.y, im.height - 1)
+          c.w = Math.max(1, Math.min(c.w, im.width - c.x))
+          c.h = Math.max(1, Math.min(c.h, im.height - c.y))
+        }, false)
       })
       return el
     }
     body.append(
-      h('h4', null, 'Crop (image pixels)'),
-      h('div', { class: 'mt-form mt-form-4' }, h('label', null, 'X'), cropIn('x'), h('label', null, 'Y'), cropIn('y'), h('label', null, 'W'), cropIn('w'), h('label', null, 'H'), cropIn('h')),
+      h('h4', null, 'Crop'),
       h(
         'div',
         { class: 'mt-row' },
-        h('button', { class: `mt-btn${this.map.tool === 'crop' ? ' mt-on' : ''}`, onclick: () => this.setTool(this.map.tool === 'crop' ? 'pan' : 'crop') }, icon('crop'), 'Drag on map'),
-        h('button', { class: 'mt-btn mt-ghost', onclick: () => this.mutate((d) => (d.image!.crop = { x: 0, y: 0, w: d.image!.width, h: d.image!.height })) }, 'Reset crop'),
+        h('button', { class: `mt-btn${cropping ? ' mt-on mt-primary' : ''}`, onclick: () => this.setTool(cropping ? 'pan' : 'crop') }, icon('crop'), cropping ? 'Done' : 'Edit crop'),
+        h('button', { class: 'mt-btn mt-ghost', onclick: () => this.mutate((d) => (d.image!.crop = { x: 0, y: 0, w: d.image!.width, h: d.image!.height })) }, 'Reset'),
       ),
+      cropping ? h('div', { class: 'mt-dim' }, 'Drag the corner or edge handles on the map; drag inside the box to move it.') : '',
+      h('div', { class: 'mt-form mt-form-4' }, h('label', null, 'Left'), cropIn('x'), h('label', null, 'Top'), cropIn('y'), h('label', null, 'Width'), cropIn('w'), h('label', null, 'Height'), cropIn('h')),
     )
 
-    // Calibration
-    const row = (key: keyof Calibration, label: string) => {
-      const a = meta.calib[key]
-      const px = h('input', { class: 'mt-input', type: 'number', step: 'any', value: String(a.px) })
-      const w = h('input', { class: 'mt-input', type: 'number', step: 'any', value: String(a.w) })
-      const commit = () => {
-        const vp = numOrNull(px.value)
-        const vw = numOrNull(w.value)
-        if (vp === null || vw === null) return
-        this.mutate((d) => (d.image!.calib[key] = { px: vp, w: vw }), false)
+    // Placement: two pins tie spots on the image to world coordinates.
+    const calib = meta.calib
+    const pinning = this.map.tool === 'calib'
+    const sorted = [...p.points].sort((a, b) => a.name.localeCompare(b.name))
+    const pinCard = (k: PinKey) => {
+      const pin = calib[k]
+      const active = this.map.activePin === k
+      const field = (key: keyof CalibPin, step: string) => {
+        const el = h('input', { class: 'mt-input', type: 'number', step, value: String(pin[key]) })
+        el.addEventListener('change', () => {
+          const v = numOrNull(el.value)
+          if (v !== null) this.mutate((d) => (d.image!.calib[k][key] = v), false)
+        })
+        return el
       }
-      px.addEventListener('change', commit)
-      w.addEventListener('change', commit)
-      const active = this.calibTarget === key
+      const snap = h('select', { class: 'mt-select mt-grow', title: 'Use a known place for this pin' }, h('option', { value: '' }, 'Use a place…'))
+      if (k === 'a') snap.append(h('option', { value: '__origin' }, 'Origin (0, 0)'))
+      for (const pt of sorted) snap.append(h('option', { value: pt.id }, `${pt.name} ${formatCoord(pt.x, pt.y)}`))
+      snap.addEventListener('change', () => {
+        const pt = snap.value === '__origin' ? { x: 0, y: 0 } : p.points.find((q) => q.id === snap.value)
+        if (!pt) return
+        this.mutate((d) => Object.assign(d.image!.calib[k], { x: pt.x, y: pt.y }))
+        this.activatePin(k, true)
+      })
       return h(
         'div',
-        { class: 'mt-calib-row' },
-        h('span', { class: 'mt-lbl' }, label),
-        px,
-        w,
+        { class: `mt-pin${active ? ' mt-on' : ''}`, dataset: { pin: k }, onpointerdown: () => this.activatePin(k, false) },
         h(
-          'button',
-          {
-            class: `mt-btn${active ? ' mt-on' : ''}`,
-            title: 'Click the spot on the map',
-            onclick: () => {
-              this.calibTarget = active ? null : key
-              this.setTool(active ? 'pan' : 'calib')
-            },
-          },
-          'Pick',
+          'div',
+          { class: 'mt-pin-head' },
+          h('span', { class: `mt-pin-badge mt-pin-${k}` }, k.toUpperCase()),
+          h('b', null, k === 'a' && pin.x === 0 && pin.y === 0 ? 'Origin' : `Pin ${k.toUpperCase()}`),
+          h('span', { class: 'mt-dim' }, active && pinning ? 'click the image to place' : ''),
+          h('span', { class: 'mt-spacer' }),
+          h('button', { class: 'mt-btn mt-icon-btn', title: 'Show this pin', onclick: () => this.showPin(k) }, icon('fit')),
+        ),
+        h('div', { class: 'mt-form mt-form-4' }, h('label', null, 'World X'), field('x', 'any'), h('label', null, 'World Y'), field('y', 'any')),
+        h('div', { class: 'mt-row' }, snap),
+        h(
+          'details',
+          { class: 'mt-pin-px' },
+          h('summary', { class: 'mt-dim' }, `On the image: ${Math.round(pin.px)}, ${Math.round(pin.py)} px`),
+          h('div', { class: 'mt-form mt-form-4' }, h('label', null, 'Pixel X'), field('px', '1'), h('label', null, 'Pixel Y'), field('py', '1')),
         ),
       )
     }
+    const { mx, my } = calibMaps(calib)
+    const tl = imageToWorld(calib, meta.crop.x, meta.crop.y)
+    const br = imageToWorld(calib, meta.crop.x + meta.crop.w, meta.crop.y + meta.crop.h)
+    const pxPerUnit = (a: number) => (Math.abs(a) > 1e-9 ? (1 / Math.abs(a)).toFixed(2) : '?')
+    const scaleText =
+      calib.uniform || Math.abs(Math.abs(mx.a) - Math.abs(my.a)) < 1e-9
+        ? `1 unit = ${pxPerUnit(mx.a)} px`
+        : `1 unit = ${pxPerUnit(mx.a)} px across, ${pxPerUnit(my.a)} px down`
     body.append(
-      h('h4', null, 'Calibration'),
-      h('div', { class: 'mt-dim' }, 'Two reference points per axis (ruler ticks work best). Pick a spot, then type its real coordinate. X and Y scale independently.'),
-      h('div', { class: 'mt-calib-row mt-calib-head' }, h('span'), h('span', null, 'image px'), h('span', null, 'world'), h('span')),
-      row('x1', 'X₁'),
-      row('x2', 'X₂'),
-      row('y1', 'Y₁'),
-      row('y2', 'Y₂'),
+      h('h4', null, 'Placement'),
+      h('div', { class: 'mt-dim' }, 'Two pins tie the picture to your coordinates. Put A on a coordinate you know (usually the origin, 0, 0) and B on a second known place far from it.'),
       h(
         'div',
         { class: 'mt-row' },
-        h('button', { class: 'mt-btn mt-ghost', onclick: () => this.mutate((d) => (d.image!.calib = calibrationForBounds(d.image!.width, d.image!.height, d.bounds))) }, 'Stretch over map bounds'),
+        h('button', { class: `mt-btn${pinning ? ' mt-on mt-primary' : ''}`, onclick: () => this.setTool(pinning ? 'pan' : 'calib') }, icon('pin'), pinning ? 'Done' : 'Edit pins'),
+        h('button', { class: 'mt-btn', title: 'Set pin A to (0, 0), then click where the origin is on the image', onclick: () => this.pickOrigin() }, 'Pick origin'),
+      ),
+      pinCard('a'),
+      pinCard('b'),
+      h(
+        'label',
+        { class: 'mt-check', title: 'One scale for both axes from the distance between the pins. Turn off when the picture is stretched.' },
+        h('input', { type: 'checkbox', checked: calib.uniform, onchange: (e: Event) => this.mutate((d) => (d.image!.calib.uniform = (e.target as HTMLInputElement).checked)) }),
+        'Keep aspect ratio',
+      ),
+      h('div', { class: 'mt-dim mt-mono' }, scaleText),
+      h('div', { class: 'mt-dim mt-mono' }, `Image covers X[${Math.round(Math.min(tl.x, br.x))}, ${Math.round(Math.max(tl.x, br.x))}] Y[${Math.round(Math.min(tl.y, br.y))}, ${Math.round(Math.max(tl.y, br.y))}]`),
+      h(
+        'div',
+        { class: 'mt-row mt-wrap' },
+        h('button', { class: 'mt-btn mt-ghost', onclick: () => this.mutate((d) => (d.image!.calib = calibrationForBounds(d.image!.width, d.image!.height, d.bounds))) }, 'Fit to map bounds'),
         h('button', { class: 'mt-btn mt-ghost', onclick: () => this.map.fit() }, 'Fit view'),
       ),
+      pinning ? h('div', { class: 'mt-dim' }, 'Shift+drag on the map slides the whole grid; Shift+wheel scales it around the cursor.') : '',
     )
+  }
+
+  /** Make a pin the one a click places; updates the cards in place so inputs keep focus. */
+  private activatePin(k: PinKey, startEditing: boolean): void {
+    this.map.activePin = k
+    for (const card of this.sideBody.querySelectorAll<HTMLElement>('.mt-pin')) card.classList.toggle('mt-on', card.dataset.pin === k)
+    if (startEditing && this.map.tool !== 'calib') this.setTool('calib')
+    this.map.invalidate()
+  }
+
+  private pickOrigin(): void {
+    const im = this.profile?.image
+    if (!im) return
+    if (im.calib.a.x !== 0 || im.calib.a.y !== 0) this.mutate((d) => Object.assign(d.image!.calib.a, { x: 0, y: 0 }))
+    this.activatePin('a', true)
+    this.warn('Click where (0, 0) is on the image, or drag pin A there.')
+  }
+
+  private showPin(k: PinKey): void {
+    const pin = this.profile?.image?.calib[k]
+    if (pin) this.map.centerOn(pin.x, pin.y)
   }
 
   private async uploadImage(): Promise<void> {

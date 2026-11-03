@@ -1,5 +1,5 @@
 import type { ChatMessageDTO, LlmMessageDTO } from 'lumiverse-spindle-types'
-import { boundsOf, buildContext, calibrationForBounds, findPosTag } from './shared/geo'
+import { boundsOf, buildContext, calibrationForBounds, findPosTag, normalizeCalib } from './shared/geo'
 import { newProfile, slug } from './shared/parser'
 import {
   DEFAULT_SETTINGS,
@@ -62,7 +62,7 @@ function notice(level: 'info' | 'success' | 'warning' | 'error', message: string
   spindle.toast[level](message, { title: 'Map Tracker', userId })
 }
 
-// ── Storage ─────────────────────────────────────────────────────────────────
+// â”€â”€ Storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function readJson<T>(path: string, fallback: T, userId?: string): Promise<T> {
   try {
@@ -94,7 +94,17 @@ const imagePath = (id: string) => `images/${id}.txt`
 
 async function loadProfile(id: string | null | undefined, userId?: string): Promise<WorldProfile | null> {
   if (!id) return null
-  return readJson<WorldProfile | null>(profilePath(id), null, userId)
+  const p = await readJson<WorldProfile | null>(profilePath(id), null, userId)
+  return p && withPinCalibration(p)
+}
+
+/** Upgrades pre-0.2 per-axis calibration to pins. */
+function withPinCalibration(p: WorldProfile): WorldProfile {
+  for (const key of ['image', 'imageTemplate'] as const) {
+    const m = p[key]
+    if (m) p[key] = { ...m, calib: normalizeCalib(m.calib, m.width, m.height, p.bounds) }
+  }
+  return p
 }
 
 async function listProfiles(userId?: string): Promise<ProfileSummary[]> {
@@ -126,7 +136,7 @@ function sanitizeProfile(p: WorldProfile): WorldProfile {
   }
   const b = p.bounds
   if (!b || !(b.maxX > b.minX) || !(b.maxY > b.minY)) clean.bounds = boundsOf(clean)
-  return clean
+  return withPinCalibration(clean)
 }
 
 async function saveProfile(p: WorldProfile, userId?: string): Promise<WorldProfile> {
@@ -142,7 +152,7 @@ async function uniqueProfileId(name: string, userId?: string): Promise<string> {
   return id
 }
 
-// ── Chat state ──────────────────────────────────────────────────────────────
+// â”€â”€ Chat state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function parseJson<T>(raw: string | undefined, fallback: T): T {
   if (!raw) return fallback
@@ -234,7 +244,7 @@ async function applyTag(chatId: string, messageId: string, x: number, y: number,
   if (userState(userId).activeChatId === chatId) await sendState(userId)
 }
 
-// ── State broadcast ─────────────────────────────────────────────────────────
+// â”€â”€ State broadcast â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function sendState(userId?: string): Promise<void> {
   const us = userState(userId)
@@ -271,7 +281,7 @@ async function sendImage(profileId: string, userId?: string): Promise<void> {
   send({ type: 'image', profileId, rev: profile?.image?.rev ?? 0, dataUrl }, userId)
 }
 
-// ── Frontend messages ───────────────────────────────────────────────────────
+// â”€â”€ Frontend messages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function handle(msg: FrontendMessage, userId?: string): Promise<void> {
   const us = userState(userId)
@@ -407,8 +417,8 @@ async function handle(msg: FrontendMessage, userId?: string): Promise<void> {
       const { data } = await spindle.world_books.entries.list(msg.bookId, { limit: 2000, userId })
       const looksLikeCoords = /\[\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\]|[XY]\s*\[\s*-?\d/
       const entries = data
-        .filter((e) => looksLikeCoords.test(e.content))
-        .map((e) => ({ id: e.id, name: e.comment || e.key.join(', ') || e.id, content: e.content }))
+        .filter((e) => e.extensions?.map || looksLikeCoords.test(e.content))
+        .map((e) => ({ id: e.id, name: e.comment || e.key.join(', ') || e.id, content: e.content, ...(e.extensions?.map ? { map: e.extensions.map } : {}) }))
       return send({ type: 'worldBookEntries', bookId: msg.bookId, entries }, userId)
     }
   }
@@ -424,7 +434,7 @@ spindle.onFrontendMessage((payload, userId) => {
   })
 })
 
-// ── Position tags written by the model (or the user) ────────────────────────
+// â”€â”€ Position tags written by the model (or the user) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function onMessage(payload: unknown, userId?: string): void {
   const p = payload as { chatId?: string; message?: ChatMessageDTO }
@@ -446,7 +456,7 @@ spindle.on('CHAT_SWITCHED', (payload, userId) => {
 
 spindle.frontendCapabilities.declare('message_tag_interceptor')
 
-// ── Macro + prompt injection ────────────────────────────────────────────────
+// â”€â”€ Macro + prompt injection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 spindle.registerMacro({
   name: 'map_pos',

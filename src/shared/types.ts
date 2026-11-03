@@ -46,18 +46,31 @@ export interface Bounds {
   maxY: number
 }
 
-/** Pins one image pixel coordinate to one world coordinate on a single axis. */
-export interface AxisAnchor {
+/** Pins one spot on the image (px, py) to one world coordinate (x, y). */
+export interface CalibPin {
   px: number
-  w: number
+  py: number
+  x: number
+  y: number
 }
 
-/** Two anchors per axis, so X and Y may have different pixel scales (maps are rarely square). */
+/**
+ * Two pins place the image. Pin `a` is usually the world origin (0,0), pin `b` a
+ * known place. `uniform` keeps the image's aspect ratio (one scale from the pin
+ * distance); otherwise X and Y scale independently from the pins' offsets.
+ */
 export interface Calibration {
-  x1: AxisAnchor
-  x2: AxisAnchor
-  y1: AxisAnchor
-  y2: AxisAnchor
+  a: CalibPin
+  b: CalibPin
+  uniform: boolean
+}
+
+/** Pre-0.2 format: two anchors per axis. Still accepted when loading. */
+export interface LegacyCalibration {
+  x1: { px: number; w: number }
+  x2: { px: number; w: number }
+  y1: { px: number; w: number }
+  y2: { px: number; w: number }
 }
 
 export interface Rect {
@@ -180,9 +193,17 @@ export interface StatePayload {
   worldBooksAvailable: boolean
 }
 
+export interface WorldBookEntryLite {
+  id: string
+  name: string
+  content: string
+  /** `extensions.map` (Map Coordinate Format v1), when the entry has one. */
+  map?: unknown
+}
+
 export type BackendMessage =
   | StatePayload
   | { type: 'image'; profileId: string; rev: number; dataUrl: string | null }
   | { type: 'worldBooks'; books: { id: string; name: string }[] }
-  | { type: 'worldBookEntries'; bookId: string; entries: { id: string; name: string; content: string }[] }
+  | { type: 'worldBookEntries'; bookId: string; entries: WorldBookEntryLite[] }
   | { type: 'notice'; level: 'info' | 'success' | 'warning' | 'error'; message: string }

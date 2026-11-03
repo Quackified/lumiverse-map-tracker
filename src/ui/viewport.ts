@@ -1,5 +1,6 @@
 import {
   bearing,
+  calibMaps,
   compass,
   distanceUnits,
   formatCoord,
@@ -10,10 +11,24 @@ import {
   worldToImage,
   zoneRect,
 } from '../shared/geo'
-import type { Bounds, ChatMapState, Poi, Rect, WorldProfile, Zone } from '../shared/types'
+import type { Bounds, Calibration, ChatMapState, MapImageMeta, Poi, Rect, WorldProfile, Zone } from '../shared/types'
 import { clear, h, hueOf } from './dom'
 
 export type Tool = 'pan' | 'me' | 'dest' | 'add' | 'measure' | 'crop' | 'zone' | 'calib'
+export type PinKey = 'a' | 'b'
+type CropMode = 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
+
+const CROP_CURSOR: Record<CropMode, string> = {
+  move: 'move',
+  n: 'ns-resize',
+  s: 'ns-resize',
+  e: 'ew-resize',
+  w: 'ew-resize',
+  ne: 'nesw-resize',
+  sw: 'nesw-resize',
+  nw: 'nwse-resize',
+  se: 'nwse-resize',
+}
 
 export interface Layers {
   image: boolean
@@ -36,10 +51,14 @@ export const DEFAULT_LAYERS: Layers = {
 }
 
 export interface MapHooks {
-  /** Click with a placement tool (me/dest/add/calib). */
+  /** Click with a placement tool (me/dest/add). */
   onPick(tool: Tool, x: number, y: number): void
-  /** Finished dragging a rectangle with crop/zone tool (world coords). */
+  /** Finished dragging a rectangle with the zone tool (world coords). */
   onRect(tool: Tool, r: Bounds): void
+  /** Crop handles or calibration pins moved. `move` while dragging, `end` once settled. */
+  onImageEdit(patch: Partial<Pick<MapImageMeta, 'crop' | 'calib'>>, phase: 'move' | 'end'): void
+  /** A calibration pin was grabbed or clicked. */
+  onActivePin(pin: PinKey): void
   onSelectPoi(poi: Poi | null): void
   onContextMenu(x: number, y: number, poi: Poi | null, clientX: number, clientY: number): void
   onToolDone(): void
@@ -103,7 +122,25 @@ export class MapView {
   private measure: { a: { x: number; y: number }; b: { x: number; y: number } | null } | null = null
   private dragRect: { a: { x: number; y: number }; b: { x: number; y: number } } | null = null
   private pointers = new Map<number, { x: number; y: number }>()
-  private gesture: { mode: 'pan' | 'rect' | 'pinch' | 'none'; sx: number; sy: number; moved: boolean; view: View; dist: number; mid: { x: number; y: number } } | null = null
+  private gesture: {
+    mode: 'pan' | 'rect' | 'pinch' | 'pin' | 'slide' | 'crop'
+    sx: number
+    sy: number
+    moved: boolean
+    view: View
+    dist: number
+    mid: { x: number; y: number }
+    pin?: PinKey
+    crop?: CropMode
+    startCrop?: Rect
+    startCalib?: Calibration
+    startImg?: { px: number; py: number }
+  } | null = null
+  /** Calibration pin that a plain click on the image moves. */
+  activePin: PinKey = 'a'
+  /** While calibrating, the image stays put on screen and the coordinate overlay moves instead. */
+  private frozen: Calibration | null = null
+  private wheelEnd: ReturnType<typeof setTimeout> | null = null
   private raf = 0
   private theme: Theme | null = null
   private ro: ResizeObserver
@@ -142,7 +179,10 @@ export class MapView {
       this.hasView = false
       this.image = null
       this.measure = null
+      this.frozen = null
     }
+    if (this.tool === 'calib' && !this.frozen && p?.image) this.frozen = structuredClone(p.image.calib)
+    if (!p?.image) this.frozen = null
     if (!this.hasView) this.fit()
     this.invalidate()
   }
@@ -158,11 +198,24 @@ export class MapView {
   }
 
   setTool(t: Tool): void {
+    if (t !== 'calib' && this.frozen) this.unfreeze()
     this.tool = t
     this.measure = t === 'measure' ? this.measure : null
     this.dragRect = null
     this.el.dataset.tool = t
+    if (t === 'calib' && this.profile?.image) this.frozen = structuredClone(this.profile.image.calib)
     this.invalidate()
+  }
+
+  /** Leave image-locked mode without the image jumping on screen. */
+  private unfreeze(): void {
+    const live = this.profile?.image?.calib
+    const f = this.frozen
+    this.frozen = null
+    if (!live || !f) return
+    const c = this.undisp(this.view.cx, this.view.cy, f, live)
+    const k = Math.abs(calibMaps(f).mx.a / calibMaps(live).mx.a)
+    this.view = { cx: c.x, cy: c.y, s: Math.max(MIN_S, Math.min(MAX_S, this.view.s * (Number.isFinite(k) ? k : 1))) }
   }
 
   setTheme(): void {
@@ -172,7 +225,7 @@ export class MapView {
 
   fit(): void {
     if (!this.profile || !this.w || !this.hgt) return
-    const b = this.imageVisible() ? this.imageWorldRect()! : this.profile.bounds
+    const b = this.imageVisible() ? this.imageViewRect(this.tool === 'crop' || this.tool === 'calib')! : this.profile.bounds
     const s = Math.min(this.w / (b.maxX - b.minX), this.hgt / (b.maxY - b.minY)) * 0.96
     this.view = { cx: (b.minX + b.maxX) / 2, cy: (b.minY + b.maxY) / 2, s: Math.max(MIN_S, Math.min(MAX_S, s)) }
     this.hasView = true
@@ -180,17 +233,18 @@ export class MapView {
   }
 
   zoomBy(f: number, sx = this.w / 2, sy = this.hgt / 2): void {
-    const before = this.toWorld(sx, sy)
+    const before = this.sView(sx, sy)
     this.view.s = Math.max(MIN_S, Math.min(MAX_S, this.view.s * f))
-    const after = this.toWorld(sx, sy)
+    const after = this.sView(sx, sy)
     this.view.cx += before.x - after.x
     this.view.cy += before.y - after.y
     this.invalidate()
   }
 
   centerOn(x: number, y: number, minScale?: number): void {
-    this.view.cx = x
-    this.view.cy = y
+    const v = this.disp(x, y)
+    this.view.cx = v.x
+    this.view.cy = v.y
     if (minScale && this.view.s < minScale) this.view.s = minScale
     this.invalidate()
   }
@@ -211,45 +265,163 @@ export class MapView {
 
   // ── Coordinates ───────────────────────────────────────────────────────────
 
-  toScreen(x: number, y: number): { x: number; y: number } {
+  // The view works in "view units". Normally they are world units. While
+  // calibrating they are the frozen calibration's world units, so the image
+  // holds still and world-space drawing goes through disp()/undisp().
+
+  /** View units → screen pixels. */
+  private vScreen(x: number, y: number): { x: number; y: number } {
     const v = this.view
     return { x: (x - v.cx) * v.s + this.w / 2, y: this.hgt / 2 - (y - v.cy) * v.s }
   }
 
-  toWorld(sx: number, sy: number): { x: number; y: number } {
+  /** Screen pixels → view units. */
+  private sView(sx: number, sy: number): { x: number; y: number } {
     const v = this.view
     return { x: (sx - this.w / 2) / v.s + v.cx, y: v.cy - (sy - this.hgt / 2) / v.s }
   }
 
-  private imageVisible(): boolean {
-    return !!(this.layers.image && this.image && this.profile?.image?.visible)
+  /** World → view units. */
+  private disp(x: number, y: number): { x: number; y: number } {
+    const live = this.profile?.image?.calib
+    if (!this.frozen || !live) return { x, y }
+    const p = worldToImage(live, x, y)
+    return imageToWorld(this.frozen, p.px, p.py)
   }
 
-  private imageWorldRect(): Bounds | null {
+  /** View units → world. */
+  private undisp(x: number, y: number, f = this.frozen, live = this.profile?.image?.calib): { x: number; y: number } {
+    if (!f || !live) return { x, y }
+    const p = worldToImage(f, x, y)
+    return imageToWorld(live, p.px, p.py)
+  }
+
+  toScreen(x: number, y: number): { x: number; y: number } {
+    const v = this.disp(x, y)
+    return this.vScreen(v.x, v.y)
+  }
+
+  toWorld(sx: number, sy: number): { x: number; y: number } {
+    const v = this.sView(sx, sy)
+    return this.undisp(v.x, v.y)
+  }
+
+  /** Calibration the image is drawn with (frozen while calibrating). */
+  private drawCalib(): Calibration | null {
+    return this.frozen ?? this.profile?.image?.calib ?? null
+  }
+
+  imgToScreen(px: number, py: number): { x: number; y: number } {
+    const w = imageToWorld(this.drawCalib()!, px, py)
+    return this.vScreen(w.x, w.y)
+  }
+
+  screenToImg(sx: number, sy: number): { px: number; py: number } {
+    const v = this.sView(sx, sy)
+    return worldToImage(this.drawCalib()!, v.x, v.y)
+  }
+
+  private editingImage(): boolean {
+    return (this.tool === 'crop' || this.tool === 'calib') && !!this.image && !!this.profile?.image
+  }
+
+  private imageVisible(): boolean {
+    return !!(this.image && this.profile?.image && (this.editingImage() || (this.layers.image && this.profile.image.visible)))
+  }
+
+  /** Image extent in view units: the crop, or the whole picture. */
+  private imageViewRect(full = false): Bounds | null {
     const meta = this.profile?.image
-    if (!meta) return null
-    const c = meta.crop
-    const a = imageToWorld(meta.calib, c.x, c.y)
-    const b = imageToWorld(meta.calib, c.x + c.w, c.y + c.h)
+    const calib = this.drawCalib()
+    if (!meta || !calib) return null
+    const c = full ? { x: 0, y: 0, w: meta.width, h: meta.height } : meta.crop
+    const a = imageToWorld(calib, c.x, c.y)
+    const b = imageToWorld(calib, c.x + c.w, c.y + c.h)
     return { minX: Math.min(a.x, b.x), maxX: Math.max(a.x, b.x), minY: Math.min(a.y, b.y), maxY: Math.max(a.y, b.y) }
   }
 
-  /** Image pixel under a world point (for calibration picking and cropping). */
+  /** Image pixel under a world point. */
   imagePixelAt(x: number, y: number): { px: number; py: number } | null {
     const meta = this.profile?.image
     return meta ? worldToImage(meta.calib, x, y) : null
   }
 
-  imageRectFromWorld(b: Bounds): Rect | null {
-    const meta = this.profile?.image
-    if (!meta) return null
-    const a = worldToImage(meta.calib, b.minX, b.maxY)
-    const c = worldToImage(meta.calib, b.maxX, b.minY)
-    const x = Math.max(0, Math.round(Math.min(a.px, c.px)))
-    const y = Math.max(0, Math.round(Math.min(a.py, c.py)))
-    const x2 = Math.min(meta.width, Math.round(Math.max(a.px, c.px)))
-    const y2 = Math.min(meta.height, Math.round(Math.max(a.py, c.py)))
-    return x2 - x > 2 && y2 - y > 2 ? { x, y, w: x2 - x, h: y2 - y } : null
+  // ── Image editing (crop handles, calibration pins) ────────────────────────
+
+  private cropHandles(): { mode: CropMode; x: number; y: number }[] {
+    const c = this.profile!.image!.crop
+    const a = this.imgToScreen(c.x, c.y)
+    const b = this.imgToScreen(c.x + c.w, c.y + c.h)
+    const l = Math.min(a.x, b.x)
+    const r = Math.max(a.x, b.x)
+    const t = Math.min(a.y, b.y)
+    const btm = Math.max(a.y, b.y)
+    const mx = (l + r) / 2
+    const my = (t + btm) / 2
+    return [
+      { mode: 'nw', x: l, y: t },
+      { mode: 'ne', x: r, y: t },
+      { mode: 'sw', x: l, y: btm },
+      { mode: 'se', x: r, y: btm },
+      { mode: 'n', x: mx, y: t },
+      { mode: 's', x: mx, y: btm },
+      { mode: 'w', x: l, y: my },
+      { mode: 'e', x: r, y: my },
+    ]
+  }
+
+  private cropHit(sx: number, sy: number): CropMode | null {
+    if (!this.editingImage() || this.tool !== 'crop') return null
+    for (const hd of this.cropHandles()) if (Math.hypot(hd.x - sx, hd.y - sy) <= 11) return hd.mode
+    const c = this.profile!.image!.crop
+    const p = this.screenToImg(sx, sy)
+    return p.px > c.x && p.px < c.x + c.w && p.py > c.y && p.py < c.y + c.h ? 'move' : null
+  }
+
+  private dragCrop(mode: CropMode, start: Rect, p0: { px: number; py: number }, p: { px: number; py: number }): Rect {
+    const meta = this.profile!.image!
+    const MIN = 8
+    const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v))
+    const dx = p.px - p0.px
+    const dy = p.py - p0.py
+    if (mode === 'move') {
+      return {
+        x: Math.round(clamp(start.x + dx, 0, meta.width - start.w)),
+        y: Math.round(clamp(start.y + dy, 0, meta.height - start.h)),
+        w: start.w,
+        h: start.h,
+      }
+    }
+    let x1 = start.x
+    let y1 = start.y
+    let x2 = start.x + start.w
+    let y2 = start.y + start.h
+    if (mode.includes('w')) x1 = clamp(x1 + dx, 0, x2 - MIN)
+    if (mode.includes('e')) x2 = clamp(x2 + dx, x1 + MIN, meta.width)
+    if (mode.includes('n')) y1 = clamp(y1 + dy, 0, y2 - MIN)
+    if (mode.includes('s')) y2 = clamp(y2 + dy, y1 + MIN, meta.height)
+    const rx = Math.round(x1)
+    const ry = Math.round(y1)
+    return { x: rx, y: ry, w: Math.round(x2) - rx, h: Math.round(y2) - ry }
+  }
+
+  private pinHit(sx: number, sy: number): PinKey | null {
+    if (!this.editingImage() || this.tool !== 'calib') return null
+    const c = this.profile!.image!.calib
+    let best: PinKey | null = null
+    let bestD = 14
+    for (const k of ['a', 'b'] as const) {
+      const s = this.imgToScreen(c[k].px, c[k].py)
+      const d = Math.hypot(s.x - sx, s.y - sy)
+      if (d < bestD) (bestD = d), (best = k)
+    }
+    return best
+  }
+
+  private movePin(k: PinKey, px: number, py: number, phase: 'move' | 'end'): void {
+    const c = structuredClone(this.profile!.image!.calib)
+    c[k] = { ...c[k], px: Math.round(px * 10) / 10, py: Math.round(py * 10) / 10 }
+    this.hooks.onImageEdit({ calib: c }, phase)
   }
 
   // ── Interaction ───────────────────────────────────────────────────────────
@@ -297,10 +469,29 @@ export class MapView {
         this.dragRect = null
         return
       }
-      const rectTool = this.tool === 'crop' || this.tool === 'zone'
+      const base = { sx: p.x, sy: p.y, moved: false, view: { ...this.view }, dist: 0, mid: p }
+      const meta = this.profile?.image
+      const crop = this.cropHit(p.x, p.y)
+      if (crop && meta) {
+        this.gesture = { ...base, mode: 'crop', crop, startCrop: { ...meta.crop }, startImg: this.screenToImg(p.x, p.y) }
+        return
+      }
+      const pin = this.pinHit(p.x, p.y)
+      if (pin) {
+        this.activePin = pin
+        this.hooks.onActivePin(pin)
+        this.gesture = { ...base, mode: 'pin', pin }
+        this.el.style.cursor = 'grabbing'
+        return
+      }
+      if (this.tool === 'calib' && e.shiftKey && meta && this.editingImage()) {
+        this.gesture = { ...base, mode: 'slide', startCalib: structuredClone(meta.calib), startImg: this.screenToImg(p.x, p.y) }
+        return
+      }
+      const rectTool = this.tool === 'zone'
       const w = this.toWorld(p.x, p.y)
       if (rectTool) this.dragRect = { a: w, b: w }
-      this.gesture = { mode: rectTool ? 'rect' : 'pan', sx: p.x, sy: p.y, moved: false, view: { ...this.view }, dist: 0, mid: p }
+      this.gesture = { ...base, mode: rectTool ? 'rect' : 'pan' }
     })
 
     el.addEventListener('pointermove', (e) => {
@@ -312,12 +503,18 @@ export class MapView {
         const dist = Math.hypot(a.x - b.x, a.y - b.y)
         const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
         this.view = { ...g.view }
-        const anchor = this.toWorld(g.mid.x, g.mid.y)
+        const anchor = this.sView(g.mid.x, g.mid.y)
         this.view.s = Math.max(MIN_S, Math.min(MAX_S, g.view.s * (dist / (g.dist || 1))))
-        const now = this.toWorld(mid.x, mid.y)
+        const now = this.sView(mid.x, mid.y)
         this.view.cx += anchor.x - now.x
         this.view.cy += anchor.y - now.y
         this.invalidate()
+        return
+      }
+      if (g && (g.mode === 'crop' || g.mode === 'pin' || g.mode === 'slide')) {
+        if (!g.moved && Math.hypot(p.x - g.sx, p.y - g.sy) > 2) g.moved = true
+        if (g.moved) this.editDrag(g, p.x, p.y, 'move')
+        this.updateHover(p.x, p.y)
         return
       }
       if (g && (g.mode === 'pan' || g.mode === 'rect')) {
@@ -342,6 +539,11 @@ export class MapView {
       this.gesture = null
       if (!g) return
       const p = this.local(e)
+      if (g.mode === 'crop' || g.mode === 'pin' || g.mode === 'slide') {
+        if (g.moved) this.editDrag(g, p.x, p.y, 'end')
+        this.updateHover(p.x, p.y)
+        return
+      }
       if (g.mode === 'rect' && this.dragRect) {
         const { a, b } = this.dragRect
         this.dragRect = null
@@ -374,7 +576,26 @@ export class MapView {
       (e) => {
         e.preventDefault()
         const p = this.local(e)
-        const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY
+        const dy = (e.deltaMode === 1 ? 16 : 1) * (e.deltaY || e.deltaX)
+        const meta = this.profile?.image
+        if (this.tool === 'calib' && e.shiftKey && meta && this.editingImage()) {
+          // Scale the coordinate overlay about the cursor (pins spread apart or together).
+          const k = Math.pow(1.0012, -dy)
+          const c0 = this.screenToImg(p.x, p.y)
+          const c = structuredClone(meta.calib)
+          for (const pin of [c.a, c.b]) {
+            pin.px = Math.round((c0.px + (pin.px - c0.px) * k) * 10) / 10
+            pin.py = Math.round((c0.py + (pin.py - c0.py) * k) * 10) / 10
+          }
+          this.hooks.onImageEdit({ calib: c }, 'move')
+          if (this.wheelEnd) clearTimeout(this.wheelEnd)
+          this.wheelEnd = setTimeout(() => {
+            this.wheelEnd = null
+            const cur = this.profile?.image
+            if (cur) this.hooks.onImageEdit({ calib: cur.calib }, 'end')
+          }, 400)
+          return
+        }
         this.zoomBy(Math.pow(1.0015, -dy), p.x, p.y)
         this.updateHover(p.x, p.y)
       },
@@ -436,9 +657,36 @@ export class MapView {
         this.hooks.onPick(this.tool, poi ? poi.x : w.x, poi ? poi.y : w.y)
         return
       case 'add':
-      case 'calib':
         this.hooks.onPick(this.tool, w.x, w.y)
         return
+      case 'calib': {
+        if (!this.editingImage()) return
+        // A click drops the active pin on that spot of the image.
+        const ip = this.screenToImg(sx, sy)
+        this.movePin(this.activePin, ip.px, ip.py, 'end')
+        return
+      }
+    }
+  }
+
+  private editDrag(g: NonNullable<MapView['gesture']>, sx: number, sy: number, phase: 'move' | 'end'): void {
+    const meta = this.profile?.image
+    if (!meta) return
+    const ip = this.screenToImg(sx, sy)
+    if (g.mode === 'crop' && g.crop && g.startCrop && g.startImg) {
+      this.hooks.onImageEdit({ crop: this.dragCrop(g.crop, g.startCrop, g.startImg, ip) }, phase)
+    } else if (g.mode === 'pin' && g.pin) {
+      this.movePin(g.pin, ip.px, ip.py, phase)
+    } else if (g.mode === 'slide' && g.startCalib && g.startImg) {
+      // Slide the whole coordinate overlay: both pins move by the drag offset.
+      const dx = ip.px - g.startImg.px
+      const dy = ip.py - g.startImg.py
+      const c = structuredClone(g.startCalib)
+      for (const pin of [c.a, c.b]) {
+        pin.px = Math.round((pin.px + dx) * 10) / 10
+        pin.py = Math.round((pin.py + dy) * 10) / 10
+      }
+      this.hooks.onImageEdit({ calib: c }, phase)
     }
   }
 
@@ -446,7 +694,20 @@ export class MapView {
     const w = this.toWorld(sx, sy)
     this.hover = { x: w.x, y: w.y, sx, sy }
     this.hoverPoi = this.poiAt(sx, sy)
-    this.el.style.cursor = this.hoverPoi && this.tool === 'pan' ? 'pointer' : ''
+    const g = this.gesture
+    const crop = g?.mode === 'crop' ? g.crop! : g ? null : this.cropHit(sx, sy)
+    const pin = g?.mode === 'pin' ? g.pin! : g ? null : this.pinHit(sx, sy)
+    this.el.style.cursor = crop
+      ? CROP_CURSOR[crop]
+      : pin
+        ? g
+          ? 'grabbing'
+          : 'grab'
+        : g?.mode === 'slide'
+          ? 'move'
+          : this.hoverPoi && this.tool === 'pan'
+            ? 'pointer'
+            : ''
     this.renderReadout()
     this.invalidate()
   }
@@ -485,9 +746,9 @@ export class MapView {
       const km = distanceUnits(me.x, me.y, x, y) * p.unitKm
       if (km > 0.05) r.append(h('div', { class: 'mt-ro-dim' }, `From you: ${formatKm(km)} ${compass(bearing(me.x, me.y, x, y))}`))
     }
-    if (this.tool === 'calib' && p.image) {
-      const ip = worldToImage(p.image.calib, x, y)
-      r.append(h('div', { class: 'mt-ro-dim' }, `Image px: ${Math.round(ip.px)}, ${Math.round(ip.py)}`))
+    if (this.editingImage()) {
+      const ip = this.screenToImg(this.hover.sx, this.hover.sy)
+      r.append(h('div', { class: 'mt-ro-dim' }, `Image pixel ${Math.round(ip.px)}, ${Math.round(ip.py)}`))
     }
   }
 
@@ -540,52 +801,149 @@ export class MapView {
     g.fillRect(0, 0, this.w, this.hgt)
 
     const p = this.profile
-    const step = niceStep(80 / this.view.s)
+    const o = this.toWorld(0, 0)
+    const unitPerPx = Math.abs(this.toWorld(1, 0).x - o.x) || 1 / this.view.s
+    const step = niceStep(80 * unitPerPx)
     if (p) {
-      if (this.imageVisible()) this.drawImage()
+      const cropping = this.tool === 'crop' && this.editingImage()
+      if (this.imageVisible()) this.drawImage(cropping)
       if (this.layers.grid) this.drawGrid(step, t)
-      if (this.layers.regions) this.drawZones(p, 'region', t)
-      if (this.layers.zones) this.drawZones(p, 'zone', t)
-      if (this.layers.trail) this.drawTrail(t)
-      this.drawDestLine(t)
-      if (this.layers.points) this.drawPoints(p, t)
-      this.drawMeasure(p, t)
-      this.drawMarkers(t)
-      this.drawDragRect(t)
-      if (this.tool === 'crop' && this.profile?.image) this.drawCropOutline(t)
+      if (!cropping) {
+        if (this.layers.regions) this.drawZones(p, 'region', t)
+        if (this.layers.zones) this.drawZones(p, 'zone', t)
+        if (this.layers.trail) this.drawTrail(t)
+        this.drawDestLine(t)
+        if (this.layers.points) this.drawPoints(p, t)
+        this.drawMeasure(p, t)
+        this.drawMarkers(t)
+        this.drawDragRect(t)
+      }
+      if (cropping) this.drawCropEditor(t)
+      if (this.tool === 'calib' && this.editingImage()) this.drawPins(t)
     }
     this.drawRulers(step, t)
   }
 
-  private drawImage(): void {
+  private screenRect(px: number, py: number, pw: number, ph: number): { x: number; y: number; w: number; h: number } {
+    const a = this.imgToScreen(px, py)
+    const b = this.imgToScreen(px + pw, py + ph)
+    return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(b.x - a.x), h: Math.abs(b.y - a.y) }
+  }
+
+  /** The cropped image, or the whole picture while cropping. */
+  private drawImage(full: boolean): void {
     const meta = this.profile!.image!
     const img = this.image!
-    const c = meta.crop
-    const a = imageToWorld(meta.calib, c.x, c.y)
-    const b = imageToWorld(meta.calib, c.x + c.w, c.y + c.h)
-    const sa = this.toScreen(a.x, a.y)
-    const sb = this.toScreen(b.x, b.y)
+    const c = full ? { x: 0, y: 0, w: meta.width, h: meta.height } : meta.crop
+    const r = this.screenRect(c.x, c.y, c.w, c.h)
     const g = this.g
     g.save()
-    g.globalAlpha = meta.opacity
+    g.globalAlpha = this.editingImage() ? Math.max(meta.opacity, 0.85) : meta.opacity
     g.imageSmoothingEnabled = true
     g.imageSmoothingQuality = 'high'
-    g.drawImage(img, c.x, c.y, c.w, c.h, Math.min(sa.x, sb.x), Math.min(sa.y, sb.y), Math.abs(sb.x - sa.x), Math.abs(sb.y - sa.y))
+    g.drawImage(img, c.x, c.y, c.w, c.h, r.x, r.y, r.w, r.h)
     g.restore()
   }
 
-  private drawCropOutline(t: Theme): void {
+  /** Dimmed outside, a framed crop box with thirds, eight handles and its size. */
+  private drawCropEditor(t: Theme): void {
     const meta = this.profile!.image!
-    const a = imageToWorld(meta.calib, 0, 0)
-    const b = imageToWorld(meta.calib, meta.width, meta.height)
-    const sa = this.toScreen(a.x, a.y)
-    const sb = this.toScreen(b.x, b.y)
+    const full = this.screenRect(0, 0, meta.width, meta.height)
+    const c = this.screenRect(meta.crop.x, meta.crop.y, meta.crop.w, meta.crop.h)
     const g = this.g
     g.save()
-    g.setLineDash([4, 4])
-    g.strokeStyle = t.muted
-    g.strokeRect(Math.min(sa.x, sb.x), Math.min(sa.y, sb.y), Math.abs(sb.x - sa.x), Math.abs(sb.y - sa.y))
+    g.fillStyle = 'rgba(0,0,0,0.55)'
+    g.beginPath()
+    g.rect(full.x, full.y, full.w, full.h)
+    g.rect(c.x, c.y, c.w, c.h)
+    g.fill('evenodd')
+    g.strokeStyle = 'rgba(255,255,255,0.35)'
+    g.lineWidth = 1
+    g.beginPath()
+    for (const f of [1 / 3, 2 / 3]) {
+      g.moveTo(c.x + c.w * f, c.y)
+      g.lineTo(c.x + c.w * f, c.y + c.h)
+      g.moveTo(c.x, c.y + c.h * f)
+      g.lineTo(c.x + c.w, c.y + c.h * f)
+    }
+    g.stroke()
+    g.strokeStyle = '#fff'
+    g.lineWidth = 1.5
+    g.strokeRect(c.x, c.y, c.w, c.h)
+    const active = this.gesture?.mode === 'crop' ? this.gesture.crop : null
+    for (const hd of this.cropHandles()) {
+      const corner = hd.mode.length === 2
+      g.fillStyle = hd.mode === active ? t.primary : '#fff'
+      g.strokeStyle = 'rgba(0,0,0,0.5)'
+      g.lineWidth = 1
+      g.beginPath()
+      if (corner) g.arc(hd.x, hd.y, 6.5, 0, Math.PI * 2)
+      else g.roundRect(hd.x - (hd.mode === 'n' || hd.mode === 's' ? 9 : 3), hd.y - (hd.mode === 'n' || hd.mode === 's' ? 3 : 9), hd.mode === 'n' || hd.mode === 's' ? 18 : 6, hd.mode === 'n' || hd.mode === 's' ? 6 : 18, 3)
+      g.fill()
+      g.stroke()
+    }
+    const label = `${meta.crop.w} × ${meta.crop.h} px`
+    g.font = '600 11px system-ui, sans-serif'
+    const tw = g.measureText(label).width + 12
+    const ly = c.y + c.h + 8 + 20 > this.hgt ? c.y + c.h - 28 : c.y + c.h + 8
+    g.fillStyle = 'rgba(0,0,0,0.65)'
+    g.beginPath()
+    g.roundRect(c.x + c.w / 2 - tw / 2, ly, tw, 20, 10)
+    g.fill()
+    g.fillStyle = '#fff'
+    g.textAlign = 'center'
+    g.fillText(label, c.x + c.w / 2, ly + 14)
     g.restore()
+  }
+
+  /** Calibration pins: a ring + crosshair, labelled with the coordinate they pin. */
+  private drawPins(t: Theme): void {
+    const c = this.profile!.image!.calib
+    const g = this.g
+    const sa = this.imgToScreen(c.a.px, c.a.py)
+    const sb = this.imgToScreen(c.b.px, c.b.py)
+    g.save()
+    g.strokeStyle = t.text
+    g.globalAlpha = 0.5
+    g.setLineDash([4, 4])
+    g.beginPath()
+    g.moveTo(sa.x, sa.y)
+    g.lineTo(sb.x, sb.y)
+    g.stroke()
+    g.restore()
+    for (const k of ['a', 'b'] as const) {
+      const pin = c[k]
+      const s = k === 'a' ? sa : sb
+      const on = this.activePin === k
+      const color = k === 'a' ? t.primary : t.accent
+      g.save()
+      g.lineWidth = on ? 2.5 : 1.5
+      g.strokeStyle = '#fff'
+      g.beginPath()
+      g.arc(s.x, s.y, on ? 11 : 9, 0, Math.PI * 2)
+      g.fillStyle = color
+      g.globalAlpha = 0.28
+      g.fill()
+      g.globalAlpha = 1
+      g.strokeStyle = color
+      g.stroke()
+      g.beginPath()
+      g.moveTo(s.x - 16, s.y)
+      g.lineTo(s.x - 4, s.y)
+      g.moveTo(s.x + 4, s.y)
+      g.lineTo(s.x + 16, s.y)
+      g.moveTo(s.x, s.y - 16)
+      g.lineTo(s.x, s.y - 4)
+      g.moveTo(s.x, s.y + 4)
+      g.lineTo(s.x, s.y + 16)
+      g.lineWidth = 1.5
+      g.stroke()
+      g.font = `${on ? 700 : 600} 12px system-ui, sans-serif`
+      g.fillStyle = color
+      const name = k === 'a' ? 'A' : 'B'
+      this.haloText(`${name} ${formatCoord(pin.x, pin.y, 2)}`, s.x + 14, s.y - 12, t)
+      g.restore()
+    }
   }
 
   private drawGrid(step: number, t: Theme): void {

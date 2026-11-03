@@ -68,7 +68,96 @@ export function debounce<A extends unknown[]>(fn: (...a: A) => void, ms: number)
   return run
 }
 
+/**
+ * Modifier + drag on any number input inside `root` nudges its value, like a
+ * game-engine inspector: Ctrl ±1, Shift ±10, Ctrl+Shift ±100, Alt ±0.1,
+ * Ctrl+Alt ±0.01. Whole steps snap to multiples of the step. The same
+ * modifiers work with the arrow keys. Each change fires `input` + `change`.
+ */
+export function enableScrub(root: HTMLElement, hooks: { onStart?(): void; onEnd?(): void } = {}): () => void {
+  const PX_PER_STEP = 6
+  const stepFor = (e: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean }): number | null => {
+    const ctrl = e.ctrlKey || e.metaKey
+    if (e.altKey) return ctrl ? 0.01 : 0.1
+    if (ctrl && e.shiftKey) return 100
+    if (e.shiftKey) return 10
+    if (ctrl) return 1
+    return null
+  }
+  const isNum = (t: EventTarget | null): t is HTMLInputElement => t instanceof HTMLInputElement && t.type === 'number' && !t.disabled && !t.readOnly
+  const apply = (input: HTMLInputElement, base: number, steps: number, step: number) => {
+    let v = base + steps * step
+    v = step >= 1 ? Math.round(v / step) * step : Number((Math.round(v / step) * step).toFixed(Math.ceil(-Math.log10(step))))
+    const min = input.min === '' ? -Infinity : Number(input.min)
+    const max = input.max === '' ? Infinity : Number(input.max)
+    v = Math.max(min, Math.min(max, v))
+    if (String(v) === input.value) return
+    input.value = String(v)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+  }
+
+  const down = (e: PointerEvent) => {
+    if (!isNum(e.target) || e.button !== 0) return
+    const step0 = stepFor(e)
+    if (step0 === null) return
+    const input = e.target
+    e.preventDefault()
+    input.focus({ preventScroll: true })
+    input.setPointerCapture(e.pointerId)
+    const base = Number(input.value) || 0
+    const sx = e.clientX
+    const sy = e.clientY
+    const prevCursor = document.body.style.cursor
+    document.body.style.cursor = 'ew-resize'
+    input.classList.add('mt-scrubbing')
+    hooks.onStart?.()
+    // Re-base when the modifier changes mid-drag so the value doesn't jump.
+    let anchor = { x: sx, y: sy, value: base, step: step0 }
+    const move = (ev: PointerEvent) => {
+      const step = stepFor(ev) ?? anchor.step
+      if (step !== anchor.step) anchor = { x: ev.clientX, y: ev.clientY, value: Number(input.value) || 0, step }
+      const steps = Math.trunc((ev.clientX - anchor.x - (ev.clientY - anchor.y)) / PX_PER_STEP)
+      apply(input, anchor.value, steps, step)
+    }
+    const up = () => {
+      input.removeEventListener('pointermove', move)
+      input.removeEventListener('pointerup', up)
+      input.removeEventListener('pointercancel', up)
+      document.body.style.cursor = prevCursor
+      input.classList.remove('mt-scrubbing')
+      hooks.onEnd?.()
+    }
+    input.addEventListener('pointermove', move)
+    input.addEventListener('pointerup', up)
+    input.addEventListener('pointercancel', up)
+  }
+
+  const key = (e: KeyboardEvent) => {
+    if (!isNum(e.target) || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return
+    const step = stepFor(e)
+    if (step === null) return
+    e.preventDefault()
+    apply(e.target, Number(e.target.value) || 0, e.key === 'ArrowUp' ? 1 : -1, step)
+  }
+
+  const over = (e: PointerEvent) => {
+    if (isNum(e.target) && !e.target.title) e.target.title = 'Ctrl/Shift/Alt + drag (or arrow keys) to adjust: ±1 / ±10 / ±0.1, Ctrl+Shift ±100'
+  }
+
+  root.addEventListener('pointerdown', down, true)
+  root.addEventListener('keydown', key, true)
+  root.addEventListener('pointerover', over)
+  return () => {
+    root.removeEventListener('pointerdown', down, true)
+    root.removeEventListener('keydown', key, true)
+    root.removeEventListener('pointerover', over)
+  }
+}
+
 export const ICONS = {
+  undo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>',
+  redo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>',
   map: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg>',
   pan: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/></svg>',
   me: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3.2" fill="currentColor"/><circle cx="12" cy="12" r="8"/></svg>',

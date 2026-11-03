@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import manifest from '../spindle.json'
 import { movePoint, placeRef, placesVarName, placesVarValue, revertPoint } from '../src/shared/places'
 import { applyRefs, findCoords, guessName, resolveRefs } from '../src/shared/convert'
+import { DEFAULT_LAND, LAKE, OCEAN, biomesOf, buildGraph, dropSmallRegions, encodeBytes, findCell, floodCells, graphFor, isWater, regionRings, smoothCells } from '../src/shared/cells'
 import {
   bearing,
   buildContext,
@@ -518,5 +519,51 @@ describe('lorebook conversion', () => {
     expect(back.split('\n')[0]).toBe('* **Shackle City** (-26, 67), a slave market.')
     expect(parseCoordinateText(back).points.find((p) => p.name === 'Shackle City')).toMatchObject({ x: -26, y: 67 })
     expect(findCoords(out, '', pts).some((h) => h.placeId === 'shackle-city')).toBe(false)
+  })
+})
+
+describe('land grid', () => {
+  const bounds = { minX: -200, maxX: 200, minY: -100, maxY: 100 }
+
+  it('builds the same cells from the same seed, and finds the cell under a point', () => {
+    const a = buildGraph(bounds, 3000, 7)
+    const b = buildGraph(bounds, 3000, 7)
+    expect(a.n).toBe(b.n)
+    expect(Array.from(a.points.slice(0, 20))).toEqual(Array.from(b.points.slice(0, 20)))
+    for (const [x, y] of [[0, 0], [-199, -99], [199, 99], [57.3, -41.2]]) {
+      const c = findCell(a, x, y)
+      let best = 0
+      let bd = Infinity
+      for (let i = 0; i < a.n; i++) {
+        const d = (a.points[2 * i] - x) ** 2 + (a.points[2 * i + 1] - y) ** 2
+        if (d < bd) {
+          bd = d
+          best = i
+        }
+      }
+      expect(c).toBe(best)
+    }
+  })
+
+  it('traces region outlines with holes, and round-trips the stored bytes', () => {
+    const g = buildGraph(bounds, 4000, 3)
+    const v = new Uint8Array(g.n)
+    for (let i = 0; i < g.n; i++) {
+      const d = Math.hypot(g.points[2 * i], g.points[2 * i + 1])
+      v[i] = d < 60 ? (d < 20 ? LAKE : DEFAULT_LAND) : OCEAN
+    }
+    const land = regionRings(g, (c) => (isWater(v[c]) ? null : 1)).get(1)!
+    expect(land.length).toBe(2) // the island and its lake
+    const grid = { v: 1 as const, bounds, cells: 4000, seed: 3, biome: encodeBytes(v) }
+    expect(Array.from(biomesOf(grid, graphFor(grid)))).toEqual(Array.from(v))
+    expect(floodCells(g, v, findCell(g, 0, 0)).every((c) => v[c] === LAKE)).toBe(true)
+  })
+
+  it('clears speckle and tiny islands', () => {
+    const g = buildGraph(bounds, 3000, 5)
+    const v = new Uint8Array(g.n)
+    v[findCell(g, 100, 50)] = DEFAULT_LAND
+    expect(dropSmallRegions(g, v, 3).some((b) => b !== OCEAN)).toBe(false)
+    expect(smoothCells(g, v, 1).some((b) => b !== OCEAN)).toBe(false)
   })
 })

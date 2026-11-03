@@ -15,8 +15,12 @@ import {
 import type { Bounds, Calibration, ChatMapState, Feature, MapImageMeta, Poi, Rect, WorldProfile, Zone } from '../shared/types'
 import { clear, h, hueOf } from './dom'
 import { VectorEditor, isVectorTool, type VectorTool } from './vector'
+import { LandRenderer } from './landmap'
+import { biomeName } from '../shared/cells'
 
-export type Tool = 'pan' | 'me' | 'dest' | 'add' | 'measure' | 'crop' | 'zone' | 'imgxf' | 'pmove' | VectorTool
+export type LandTool = 'lbrush' | 'lfill' | 'lsample'
+export const isLandTool = (t: string): t is LandTool => t === 'lbrush' || t === 'lfill' || t === 'lsample'
+export type Tool = 'pan' | 'me' | 'dest' | 'add' | 'measure' | 'crop' | 'zone' | 'imgxf' | 'pmove' | VectorTool | LandTool
 type CropMode = 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
 
 const CROP_CURSOR: Record<CropMode, string> = {
@@ -39,9 +43,11 @@ export interface Layers {
   points: boolean
   labels: boolean
   trail: boolean
+  land: boolean
 }
 
 export const DEFAULT_LAYERS: Layers = {
+  land: true,
   image: true,
   grid: true,
   regions: true,
@@ -63,6 +69,8 @@ export interface MapHooks {
   onFeatureSelection(ids: string[]): void
   warn(message: string): void
   onSelectPoi(poi: Poi | null): void
+  /** Land tools: `down` on press, `move` while dragging (brush only), `end` on release. */
+  onLand(tool: LandTool, phase: 'down' | 'move' | 'end', x: number, y: number, e: { altKey: boolean; shiftKey: boolean }): void
   /** A place dragged (or nudged) with the Move places tool. `move` while dragging, `end` once dropped. */
   onPoiMove(id: string, x: number, y: number, phase: 'move' | 'end'): void
   onContextMenu(x: number, y: number, poi: Poi | null, clientX: number, clientY: number): void
@@ -117,6 +125,12 @@ export class MapView {
   layers: Layers = { ...DEFAULT_LAYERS }
   tool: Tool = 'pan'
   selectedId: string | null = null
+  readonly land = new LandRenderer()
+  /** Land brush radius in screen pixels. */
+  brushPx = 24
+  /** Draw the map picture above the land grid (for comparing while painting or seeding). */
+  imageOnTop = false
+  landOpacity = 1
 
   private view: View = { cx: 0, cy: 0, s: 1 }
   private w = 0
@@ -128,7 +142,7 @@ export class MapView {
   private dragRect: { a: { x: number; y: number }; b: { x: number; y: number } } | null = null
   private pointers = new Map<number, { x: number; y: number }>()
   private gesture: {
-    mode: 'pan' | 'rect' | 'pinch' | 'crop' | 'imgxf' | 'vector' | 'poi'
+    mode: 'pan' | 'rect' | 'pinch' | 'crop' | 'imgxf' | 'vector' | 'poi' | 'land'
     sx: number
     sy: number
     moved: boolean
@@ -147,6 +161,7 @@ export class MapView {
   /** Space held: drag pans whatever the tool. */
   private spaceDown = false
   readonly vec: VectorEditor
+  private painter: import('./terrain').Painter
   private raf = 0
   private theme: Theme | null = null
   private ro: ResizeObserver
@@ -178,6 +193,11 @@ export class MapView {
       onSelection: (ids) => this.hooks.onFeatureSelection(ids),
       warn: (m) => this.hooks.warn(m),
     })
+    this.painter = {
+      toScreen: (x, y) => this.toScreen(x, y),
+      toWorld: (sx, sy) => this.toWorld(sx, sy),
+      scale: () => this.view.s,
+    }
     this.ro = new ResizeObserver(() => this.resize())
     this.ro.observe(this.el)
     this.bind()
@@ -254,6 +274,11 @@ export class MapView {
   }
 
   /** Scale that comfortably shows ~1/8 of the profile width. */
+  /** World units per screen pixel at the current zoom. */
+  unitsPerPx(): number {
+    return 1 / this.view.s
+  }
+
   focusScale(): number {
     if (!this.profile || !this.w) return this.view.s
     return (this.w / (this.profile.bounds.maxX - this.profile.bounds.minX)) * 4
@@ -482,6 +507,12 @@ export class MapView {
             : { ...base, mode: 'crop', crop, startCrop: { ...meta.crop }, startImg: this.screenToImg(p.x, p.y) }
         return
       }
+      if (isLandTool(this.tool) && this.profile?.land) {
+        const w = this.toWorld(p.x, p.y)
+        this.gesture = { ...base, mode: 'land' }
+        this.hooks.onLand(this.tool, 'down', w.x, w.y, e)
+        return
+      }
       if (this.tool === 'pmove') {
         const poi = this.poiAt(p.x, p.y)
         if (poi) {
@@ -526,6 +557,14 @@ export class MapView {
         this.updateHover(p.x, p.y)
         return
       }
+      if (g?.mode === 'land') {
+        if (this.tool === 'lbrush') {
+          const w = this.toWorld(p.x, p.y)
+          this.hooks.onLand(this.tool, 'move', w.x, w.y, e)
+        }
+        this.updateHover(p.x, p.y)
+        return
+      }
       if (g?.mode === 'poi') {
         if (!g.moved && Math.hypot(p.x - g.sx, p.y - g.sy) > 2) g.moved = true
         if (g.moved) this.dragPoi(g, p.x, p.y, e, 'move')
@@ -561,6 +600,12 @@ export class MapView {
       const p = this.local(e)
       if (g.mode === 'crop' || g.mode === 'imgxf') {
         if (g.moved) this.editDrag(g, p.x, p.y, 'end', e.shiftKey)
+        this.updateHover(p.x, p.y)
+        return
+      }
+      if (g.mode === 'land') {
+        const w = this.toWorld(p.x, p.y)
+        if (isLandTool(this.tool)) this.hooks.onLand(this.tool, 'end', w.x, w.y, e)
         this.updateHover(p.x, p.y)
         return
       }
@@ -758,6 +803,10 @@ export class MapView {
     const place = [where.zone?.name, where.region?.name].filter(Boolean).join(' · ')
     if (place) r.append(h('div', null, place))
     if (where.zones.length > 1) r.append(h('div', { class: 'mt-ro-dim' }, `also ${where.zones.slice(1).map((z) => z.name).join(', ')}`))
+    if (p.land && this.layers.land) {
+      const b = this.land.biomeAt(p.land, x, y)
+      if (b !== null) r.append(h('div', { class: 'mt-ro-dim' }, biomeName(b, p.land)))
+    }
     // What the vector layers say is here: "Land · Forest", or "Sea".
     const fs = p.features ?? []
     if (fs.length) {
@@ -842,7 +891,11 @@ export class MapView {
       const colors = { bg: t.bg, text: t.text, primary: t.primary, accent: t.accent }
       // The picture sits under the vector layers, except while it's being cropped
       // or transformed, when it comes to the front so it can be lined up.
-      if (this.imageVisible() && !editingImage) this.drawImage(false)
+      // Picking colour samples needs the picture in view, so it comes to the front then.
+      const picOnTop = this.imageOnTop || this.tool === 'lsample'
+      if (this.imageVisible() && !editingImage && !picOnTop) this.drawImage(false)
+      if (p.land && this.layers.land) this.land.draw(this.g, p.land, this.painter, this.w, this.hgt, this.landOpacity)
+      if (this.imageVisible() && !editingImage && picOnTop) this.drawImage(false)
       this.vec.draw(this.g, this.w, this.hgt, colors)
       if (this.imageVisible() && editingImage) this.drawImage(cropping)
       if (this.layers.grid) this.drawGrid(step, t)
@@ -857,6 +910,15 @@ export class MapView {
         this.drawDragRect(t)
       }
       this.vec.drawOverlay(this.g, colors, this.tool)
+      if (this.tool === 'lbrush' && this.hover && p.land) {
+        g.beginPath()
+        g.arc(this.hover.sx, this.hover.sy, this.brushPx, 0, Math.PI * 2)
+        g.strokeStyle = t.text
+        g.lineWidth = 1.5
+        g.setLineDash([4, 3])
+        g.stroke()
+        g.setLineDash([])
+      }
       if (editingImage) this.drawCropEditor(t, !cropping)
     }
     this.drawRulers(step, t)
@@ -876,7 +938,7 @@ export class MapView {
     const r = this.screenRect(c.x, c.y, c.w, c.h)
     const g = this.g
     g.save()
-    g.globalAlpha = this.editingImage() ? Math.max(meta.opacity, 0.85) : meta.opacity
+    g.globalAlpha = this.editingImage() || this.tool === 'lsample' ? Math.max(meta.opacity, 0.85) : meta.opacity
     g.imageSmoothingEnabled = true
     g.imageSmoothingQuality = 'high'
     g.drawImage(img, c.x, c.y, c.w, c.h, r.x, r.y, r.w, r.h)

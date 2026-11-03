@@ -125,6 +125,27 @@ export interface Feature {
   hidden?: boolean
 }
 
+/**
+ * The world as irregular cells, each with a biome. Only the biome bytes are
+ * stored; the cell geometry is rebuilt from bounds, cell count and seed.
+ */
+export interface LandGrid {
+  v: 1
+  bounds: Bounds
+  /** Approximate number of cells. */
+  cells: number
+  seed: number
+  /** Biome id per cell (0 = ocean), base64. */
+  biome: string
+  /** Custom colours / names per biome id. */
+  colors?: Record<number, string>
+  names?: Record<number, string>
+  /** Colour samples used to seed the grid from the map image. */
+  samples?: { biome: number; rgb: [number, number, number] }[]
+  /** Draw the tree / hill / mountain symbols inside matching biomes. */
+  symbols?: boolean
+}
+
 export interface LayerSettings {
   visible: boolean
   locked: boolean
@@ -144,6 +165,8 @@ export interface WorldProfile {
   image?: MapImageMeta
   /** Crop/calibration from an imported map file, applied when an image of the same size is uploaded. */
   imageTemplate?: MapImageMeta
+  /** Land grid: cells with biomes, drawn as the map's land and sea. */
+  land?: LandGrid
   /** Global variable the place coordinates are published to (e.g. "endwright_places"). Unset = off. */
   placesVar?: string
   /** The raw coordinate text this profile was last imported from. */

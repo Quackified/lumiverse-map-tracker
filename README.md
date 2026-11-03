@@ -116,9 +116,22 @@ Once places live on the map, the coordinates written into entries can point at i
 - **Apply** writes only the ticked changes, skips any entry edited since the preview, and turns on the lorebook variable if it was off. The original text of every changed entry is saved first; **Lorebook backups** lists them, and **Restore** (click twice) puts entries back. A restore is backed up too.
 - Converted entries still import: references are read back as the coordinates they stand for.
 
-## Map layers (shapes)
+## Land (cells and biomes)
 
-Draw the world itself in world coordinates, so the map conforms to your data instead of to a picture. Open the **Layers** tab.
+The **Land** tab turns the world into a few thousand small irregular cells, each with a biome, and draws them as the map: ocean with a soft shallow-water edge, biomes with smooth borders, a coastline, lakes, and terrain symbols (trees in forests, conifers in taiga, grass, dunes, reeds, peaks on mountains, mounds on hills).
+
+- **Create land grid** covers the map's bounds with a small margin. Detail sets the cell count (Coarse ~4,000 to Very fine ~40,000).
+- **Biomes:** Fantasy Map Generator's set (ocean, hot and cold desert, savanna, grassland, four forest types, taiga, tundra, glacier, wetland) plus lake, mountains and hills. Click a biome to paint with it; its swatch changes its colour (↺ restores the default).
+- **Brush** paints cells under the circle (size slider); **Fill** recolours a connected region. **Keep coastline** stops a land biome from painting over water and water from painting over land. Alt+click with the brush picks the biome under the cursor. Space+drag pans. Every stroke can be undone.
+- **Seed from the map picture:** pick a biome, click **Pick colour**, and click the picture where it shows that biome (the picture comes to the front while picking). Add a sample for each look: the sea, each forest colour, sand, snow, rock. **Generate** gives every cell on the picture the biome of the nearest sample colour. **Tolerance** leaves colours unlike every sample (labels, ships, ink) to their neighbours; **Smoothing** clears speckle; **Min island** merges tiny islands and lakes. Crop the picture to the map itself first, or its frame becomes land; any leftovers are one Fill click away.
+- **Display:** opacity, terrain symbols on or off, and **Picture on top** to compare against the picture while painting.
+- Hovering shows the biome under the cursor.
+
+Cells and biomes are adapted from [Azgaar's Fantasy Map Generator](https://github.com/Azgaar/Fantasy-Map-Generator) (MIT, © Max Haniyeu): the jittered lattice and Voronoi graph, the region outline tracing, and the default biome set and colours.
+
+## Shapes (vector layers)
+
+Draw the world itself in world coordinates, so the map conforms to your data instead of to a picture. Open the **Shapes** tab.
 
 | Layer | Holds |
 |---|---|

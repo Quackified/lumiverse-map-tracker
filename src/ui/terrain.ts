@@ -177,6 +177,77 @@ export const hill: Glyph = (g, x, y, u, r) => {
   g.globalAlpha /= 0.5
 }
 
+/** One peak: sunlit west face, shaded east face, a crease, and a snowcap on the tall ones. */
+export function drawPeak(g: CanvasRenderingContext2D, x: number, y: number, h: number, b: number, lean: number, snow: boolean, ink: string): void {
+  const ax = x + lean * b
+  const ay = y - h
+  const silhouette = () => {
+    g.moveTo(x - b, y)
+    g.quadraticCurveTo(x - b * 0.42, y - h * 0.62, ax, ay)
+    g.quadraticCurveTo(x + b * 0.48, y - h * 0.55, x + b, y)
+  }
+  const creaseX = x + b * 0.12
+  g.beginPath()
+  silhouette()
+  g.closePath()
+  g.fillStyle = '#e7d8b6'
+  g.fill()
+  // Shadow face, east of the crease.
+  g.beginPath()
+  g.moveTo(ax, ay)
+  g.quadraticCurveTo(x + b * 0.48, y - h * 0.55, x + b, y)
+  g.lineTo(creaseX, y)
+  g.quadraticCurveTo(x + b * 0.02 + lean * b * 0.4, y - h * 0.5, ax, ay)
+  g.fillStyle = '#a58b67'
+  g.fill()
+  if (snow) {
+    const d = 0.3
+    const lx = ax + (x - b - ax) * d
+    const rx = ax + (x + b - ax) * d
+    const sy = ay + h * d
+    g.beginPath()
+    g.moveTo(ax, ay)
+    g.lineTo(rx, sy)
+    g.lineTo(ax + (rx - ax) * 0.45, sy - h * 0.06)
+    g.lineTo(ax + (creaseX - ax) * d, sy + h * 0.04)
+    g.lineTo(ax + (lx - ax) * 0.5, sy - h * 0.07)
+    g.lineTo(lx, sy)
+    g.closePath()
+    g.fillStyle = '#f8f9fb'
+    g.fill()
+    g.beginPath()
+    g.moveTo(ax, ay)
+    g.lineTo(rx, sy)
+    g.lineTo(ax + (rx - ax) * 0.45, sy - h * 0.06)
+    g.lineTo(ax + (creaseX - ax) * d, sy + h * 0.04)
+    g.closePath()
+    g.fillStyle = '#cdd6dd'
+    g.fill()
+  }
+  g.beginPath()
+  silhouette()
+  g.strokeStyle = ink
+  g.stroke()
+  // Crease and a short ground stroke on the shaded side.
+  g.globalAlpha *= 0.55
+  g.beginPath()
+  g.moveTo(ax, ay)
+  g.quadraticCurveTo(x + b * 0.02 + lean * b * 0.4, y - h * 0.5, creaseX, y - h * 0.08)
+  g.moveTo(x + b * 0.7, y)
+  g.lineTo(x + b * 1.25, y)
+  g.stroke()
+  g.globalAlpha /= 0.55
+}
+
+/** Scattered peaks for mountain areas. */
+const peaks: Glyph = (g, x, y, u, r) => {
+  const h = u * (0.8 + r(1) * 0.6)
+  g.lineJoin = 'round'
+  g.lineCap = 'round'
+  g.lineWidth = Math.max(0.8, Math.min(2, u / 14))
+  drawPeak(g, x, y, h, h * (0.72 + r(2) * 0.3), (r(5) - 0.5) * 0.4, r(6) > 0.55, '#4a3b2a')
+}
+
 const grass: Glyph = (g, x, y, u, r) => {
   const l = u * 0.28 * (0.7 + r(1) * 0.6)
   g.strokeStyle = '#5f7f34'
@@ -241,23 +312,31 @@ const STYLES: Record<string, Style> = {
   grassland: { spacing: 5, fill: 0.55, glyph: grass },
   desert: { spacing: 6.5, fill: 0.6, glyph: dune },
   swamp: { spacing: 4.5, fill: 0.7, glyph: reeds },
+  peaks: { spacing: 5.5, fill: 0.85, glyph: peaks },
 }
+
+export type SymbolStyle = keyof typeof STYLES
 
 export const hasSymbols = (f: Feature): boolean => f.layer === 'terrain' && f.geom === 'area' && f.type in STYLES
 
+/** What to scatter, and where. */
+export interface SymbolSpec {
+  /** Seeds the jitter, so each area keeps its own pattern. */
+  key: string
+  style: string
+  size?: number
+  density?: number
+  /** World-space box to cover. */
+  minX: number
+  minY: number
+  maxX: number
+  maxY: number
+  inside(x: number, y: number): boolean
+}
+
 /** Symbols for one terrain area, inside its rings and the visible part of the view. */
 export function paintArea(g: CanvasRenderingContext2D, f: Feature, p: Painter, viewW: number, viewH: number): void {
-  const style = STYLES[f.type]
-  if (!style || !f.rings.length) return
-  const k = p.scale()
-  const size = f.size ?? 1
-  const density = f.density ?? 1
-  // Symbol size follows Size only; density only changes how tightly they pack.
-  // Zoomed out, both grow by powers of two together, so densities keep their ratio.
-  let unit = style.spacing * size
-  while (unit * k < 7) unit *= 2
-  let step = unit / Math.sqrt(density)
-
+  if (!f.rings.length) return
   let minX = Infinity
   let minY = Infinity
   let maxX = -Infinity
@@ -268,20 +347,36 @@ export function paintArea(g: CanvasRenderingContext2D, f: Feature, p: Painter, v
     if (y < minY) minY = y
     if (y > maxY) maxY = y
   }
+  paintSymbols(g, { key: f.id, style: f.type, size: f.size, density: f.density, minX, minY, maxX, maxY, inside: (x, y) => pointInRings(x, y, f.rings) }, p, viewW, viewH)
+}
+
+/** Scatter a style's symbols over the part of `spec` that is in view. */
+export function paintSymbols(g: CanvasRenderingContext2D, spec: SymbolSpec, p: Painter, viewW: number, viewH: number): void {
+  const style = STYLES[spec.style]
+  if (!style) return
+  const k = p.scale()
+  const size = spec.size ?? 1
+  const density = spec.density ?? 1
+  // Symbol size follows Size only; density only changes how tightly they pack.
+  // Zoomed out, both grow by powers of two together, so densities keep their ratio.
+  let unit = style.spacing * size
+  while (unit * k < 7) unit *= 2
+  let step = unit / Math.sqrt(density)
+
   // Clip to the view, with a margin so symbols straddling the edge still draw.
   const a = p.toWorld(-40, -40)
   const b = p.toWorld(viewW + 40, viewH + 40)
-  minX = Math.max(minX, Math.min(a.x, b.x))
-  maxX = Math.min(maxX, Math.max(a.x, b.x))
-  minY = Math.max(minY, Math.min(a.y, b.y))
-  maxY = Math.min(maxY, Math.max(a.y, b.y))
+  const minX = Math.max(spec.minX, Math.min(a.x, b.x))
+  const maxX = Math.min(spec.maxX, Math.max(a.x, b.x))
+  const minY = Math.max(spec.minY, Math.min(a.y, b.y))
+  const maxY = Math.min(spec.maxY, Math.max(a.y, b.y))
   if (minX >= maxX || minY >= maxY) return
   while (((maxX - minX) / step) * ((maxY - minY) / step) > 6000) {
     step *= 2
     unit *= 2
   }
 
-  const seed = hashString(f.id)
+  const seed = hashString(spec.key)
   const u = unit * k
   const i0 = Math.floor(minX / step)
   const i1 = Math.ceil(maxX / step)
@@ -295,7 +390,7 @@ export function paintArea(g: CanvasRenderingContext2D, f: Feature, p: Painter, v
       if (r(0) > style.fill) continue
       const wx = (i + 0.1 + r(3) * 0.8) * step
       const wy = (j + 0.1 + r(4) * 0.8) * step
-      if (!pointInRings(wx, wy, f.rings)) continue
+      if (!spec.inside(wx, wy)) continue
       const s = p.toScreen(wx, wy)
       style.glyph(g, s.x, s.y, u, r)
     }

@@ -8,7 +8,7 @@ import {
   simplify,
 } from '../shared/features'
 import type { Bounds, Feature, FeatureGeom, FeatureLayer, LayerSettings, Ring, WorldProfile } from '../shared/types'
-import { hasSymbols, hash01, hashString, hill, paintArea } from './terrain'
+import { drawPeak, hasSymbols, hash01, hashString, hill, paintArea } from './terrain'
 
 // Renders the vector layers and edits them: select, move, scale/stretch with
 // handles, drag/insert/delete vertices, and draw new areas, lines and spots.
@@ -314,64 +314,7 @@ export class VectorEditor {
 
   /** One peak: sunlit west face, shaded east face, a crease, and a snowcap on the tall ones. */
   private peak(g: CanvasRenderingContext2D, x: number, y: number, h: number, b: number, lean: number, snow: boolean, ink: string): void {
-    const ax = x + lean * b
-    const ay = y - h
-    const silhouette = () => {
-      g.moveTo(x - b, y)
-      g.quadraticCurveTo(x - b * 0.42, y - h * 0.62, ax, ay)
-      g.quadraticCurveTo(x + b * 0.48, y - h * 0.55, x + b, y)
-    }
-    const creaseX = x + b * 0.12
-    g.beginPath()
-    silhouette()
-    g.closePath()
-    g.fillStyle = '#e7d8b6'
-    g.fill()
-    // Shadow face, east of the crease.
-    g.beginPath()
-    g.moveTo(ax, ay)
-    g.quadraticCurveTo(x + b * 0.48, y - h * 0.55, x + b, y)
-    g.lineTo(creaseX, y)
-    g.quadraticCurveTo(x + b * 0.02 + lean * b * 0.4, y - h * 0.5, ax, ay)
-    g.fillStyle = '#a58b67'
-    g.fill()
-    if (snow) {
-      const d = 0.3
-      const lx = ax + (x - b - ax) * d
-      const rx = ax + (x + b - ax) * d
-      const sy = ay + h * d
-      g.beginPath()
-      g.moveTo(ax, ay)
-      g.lineTo(rx, sy)
-      g.lineTo(ax + (rx - ax) * 0.45, sy - h * 0.06)
-      g.lineTo(ax + (creaseX - ax) * d, sy + h * 0.04)
-      g.lineTo(ax + (lx - ax) * 0.5, sy - h * 0.07)
-      g.lineTo(lx, sy)
-      g.closePath()
-      g.fillStyle = '#f8f9fb'
-      g.fill()
-      g.beginPath()
-      g.moveTo(ax, ay)
-      g.lineTo(rx, sy)
-      g.lineTo(ax + (rx - ax) * 0.45, sy - h * 0.06)
-      g.lineTo(ax + (creaseX - ax) * d, sy + h * 0.04)
-      g.closePath()
-      g.fillStyle = '#cdd6dd'
-      g.fill()
-    }
-    g.beginPath()
-    silhouette()
-    g.strokeStyle = ink
-    g.stroke()
-    // Crease and a short ground stroke on the shaded side.
-    g.globalAlpha *= 0.55
-    g.beginPath()
-    g.moveTo(ax, ay)
-    g.quadraticCurveTo(x + b * 0.02 + lean * b * 0.4, y - h * 0.5, creaseX, y - h * 0.08)
-    g.moveTo(x + b * 0.7, y)
-    g.lineTo(x + b * 1.25, y)
-    g.stroke()
-    g.globalAlpha /= 0.55
+    drawPeak(g, x, y, h, b, lean, snow, ink)
   }
 
   /** Built-in symbols for spot features. */

@@ -26,14 +26,19 @@ import { clear, debounce, enableScrub, h, hueOf, icon, numOrNull } from './dom'
 import { History } from './history'
 import { MapView, type Layers, type Tool } from './viewport'
 import { DENSITY_PRESETS, hasSymbols } from './terrain'
+import { BIOMES, DETAIL, DEFAULT_LAND, biomeColor, biomeName, biomesOf, cellsWithin, encodeBytes, findCell, floodCells, graphFor, isWater, newGrid } from '../shared/cells'
+import { colorAt, makeSampler, seedFromImage, type Sampler } from './landmap'
+import { isLandTool, type LandTool } from './viewport'
+import { worldToImage } from '../shared/geo'
 
-type Tab = 'chat' | 'points' | 'zones' | 'layers' | 'import' | 'image' | 'map'
+type Tab = 'chat' | 'points' | 'zones' | 'land' | 'layers' | 'import' | 'image' | 'map'
 
 const TABS: [Tab, string][] = [
   ['chat', 'Chat'],
   ['points', 'Points'],
   ['zones', 'Zones'],
-  ['layers', 'Layers'],
+  ['land', 'Land'],
+  ['layers', 'Shapes'],
   ['import', 'Import'],
   ['image', 'Image'],
   ['map', 'Map'],
@@ -51,6 +56,9 @@ const TOOL_HINT: Partial<Record<Tool, string>> = {
   varea: 'Click to add points or drag freehand; Enter or double-click finishes. Space+drag pans.',
   vline: 'Click to add points or drag freehand; Enter or double-click finishes. Space+drag pans.',
   vspot: 'Click to place.',
+  lbrush: 'Drag to paint the selected biome. Alt+click picks the biome under the cursor. Space+drag pans.',
+  lfill: 'Click a region to fill it with the selected biome.',
+  lsample: 'Click the map picture where it shows the selected biome to add a colour sample.',
   pmove: 'Drag places to move them (Shift 10, Alt 0.1); arrows nudge. Rings mark lorebook positions.',
 }
 
@@ -125,6 +133,16 @@ export class MapApp {
   private editGroup: string | null = null
   private pointFilter = ''
   private movedOnly = false
+  /** Land painting state. */
+  private landBiome = DEFAULT_LAND
+  private landKeepCoast = true
+  private landDetail = 10000
+  private landSeed = { tolerance: 120, smooth: 1, minRegion: 6 }
+  private landStroke: Uint8Array | null = null
+  private landFrame = 0
+  private confirmRemoveLand = false
+  private picture: HTMLImageElement | null = null
+  private sampler: Sampler | null = null
   private importText = ''
   private importMode: 'merge' | 'replace' | 'new' = 'merge'
   private importPreview: ParseResult | null = null
@@ -158,6 +176,7 @@ export class MapApp {
         onRect: (tool, r) => this.onRect(tool, r),
         onSelectPoi: (poi) => this.onSelectPoi(poi),
         onPoiMove: (id, x, y, phase) => this.onPoiMove(id, x, y, phase),
+        onLand: (tool, phase, x, y, e) => this.onLand(tool, phase, x, y, e),
         onContextMenu: (x, y, poi, cx, cy) => this.openMenu(x, y, poi, cx, cy),
         onToolDone: () => this.setTool('pan'),
         onImageEdit: (patch, phase) => this.onImageEdit(patch, phase),
@@ -319,14 +338,19 @@ export class MapApp {
         break
       case 'image':
         if (msg.profileId !== this.profile?.id) return
+        this.sampler = null
         if (!msg.dataUrl) {
+          this.picture = null
           this.map.setImage(null)
           return
         }
         {
           const img = new Image()
           img.onload = () => {
-            if (msg.profileId === this.profile?.id) this.map.setImage(img)
+            if (msg.profileId !== this.profile?.id) return
+            this.picture = img
+            this.map.setImage(img)
+            if (this.tab === 'land') this.renderSide(true)
           }
           img.src = msg.dataUrl
         }
@@ -470,7 +494,11 @@ export class MapApp {
     const hint = TOOL_HINT[t]
     this.hint.hidden = !hint
     this.hint.textContent = hint ?? ''
-    const panelTools: Tool[] = ['crop', 'zone', 'imgxf', 'vselect', 'varea', 'vline', 'vspot', 'pmove']
+    const panelTools: Tool[] = ['crop', 'zone', 'imgxf', 'vselect', 'varea', 'vline', 'vspot', 'pmove', 'lbrush', 'lfill', 'lsample']
+    if (isLandTool(t) && this.tab !== 'land' && this.profile) {
+      this.tab = 'land'
+      if (!this.isSideShown()) this.toggleSide()
+    }
     if (['varea', 'vline', 'vspot'].includes(t) && this.tab !== 'layers' && this.profile) {
       this.tab = 'layers'
       if (!this.isSideShown()) this.toggleSide()
@@ -721,6 +749,9 @@ export class MapApp {
         break
       case 'layers':
         this.renderLayersTab(body)
+        break
+      case 'land':
+        this.renderLandTab(body)
         break
     }
     body.scrollTop = scroll
@@ -1664,6 +1695,352 @@ export class MapApp {
   private keepAspect = true
 
   // ── Layers tab: landmass, topography, terrain, props ──────────────────────
+
+  // ── Land grid ───────────────────────────────────────────────────────────
+
+  private renderLandTab(body: HTMLElement): void {
+    const p = this.profile!
+    const grid = p.land
+    if (!grid) {
+      const detail = h('select', { class: 'mt-select' })
+      for (const [n, label] of DETAIL) detail.append(h('option', { value: String(n), selected: n === this.landDetail }, `${label} (~${n.toLocaleString()} cells)`))
+      detail.addEventListener('change', () => (this.landDetail = Number(detail.value)))
+      body.append(
+        h('h4', null, 'Land grid'),
+        h(
+          'div',
+          { class: 'mt-dim' },
+          'Paint the world as small cells, each with a biome: ocean, grassland, forest, taiga, desert, mountains and more. Start from an empty ocean, then paint, or seed it from your map picture by sampling its colours. Cells and biomes are adapted from Azgaar’s Fantasy Map Generator (MIT).',
+        ),
+        h('div', { class: 'mt-form' }, h('label', null, 'Detail'), detail),
+        h(
+          'div',
+          { class: 'mt-row' },
+          h(
+            'button',
+            {
+              class: 'mt-btn mt-primary',
+              onclick: () => {
+                const b = p.bounds
+                const mx = (b.maxX - b.minX) * 0.06
+                const my = (b.maxY - b.minY) * 0.06
+                const bounds = { minX: Math.floor(b.minX - mx), maxX: Math.ceil(b.maxX + mx), minY: Math.floor(b.minY - my), maxY: Math.ceil(b.maxY + my) }
+                this.mutate((d) => {
+                  d.land = newGrid(bounds, this.landDetail)
+                })
+                this.setTool('lbrush')
+              },
+            },
+            'Create land grid',
+          ),
+        ),
+        h('div', { class: 'mt-dim' }, 'It covers the map’s bounds with a small margin.'),
+      )
+      return
+    }
+
+    const graph = graphFor(grid)
+    const biomes = biomesOf(grid, graph)
+    const counts = new Map<number, number>()
+    for (let i = 0; i < biomes.length; i++) counts.set(biomes[i], (counts.get(biomes[i]) ?? 0) + 1)
+    const tool = this.map.tool
+    const toolBtn = (t: LandTool, label: string, title: string) =>
+      h('button', { class: `mt-btn${tool === t ? ' mt-on' : ''}`, title, onclick: () => this.setTool(tool === t ? 'pan' : t) }, label)
+    const size = h('input', { type: 'range', min: '4', max: '120', value: String(this.map.brushPx), class: 'mt-grow' })
+    size.addEventListener('input', () => {
+      this.map.brushPx = Number(size.value)
+      this.map.invalidate()
+    })
+    const keep = h('input', { type: 'checkbox', checked: this.landKeepCoast })
+    keep.addEventListener('change', () => (this.landKeepCoast = keep.checked))
+    body.append(
+      h('h4', null, 'Paint'),
+      h('div', { class: 'mt-row mt-wrap' }, toolBtn('lbrush', 'Brush', 'Paint cells'), toolBtn('lfill', 'Fill', 'Fill a connected region'), h('label', { class: 'mt-check', title: 'Painting a land biome only changes land, and water only changes water' }, keep, 'Keep coastline')),
+      h('div', { class: 'mt-row' }, h('span', { class: 'mt-dim' }, 'Brush'), size),
+    )
+
+    // Palette: pick the biome to paint; the swatch changes its colour.
+    const pal = h('div', { class: 'mt-list' })
+    for (const b of BIOMES) {
+      const color = h('input', { class: 'mt-color', type: 'color', value: biomeColor(b.id, grid), title: 'Change colour' })
+      color.addEventListener('change', () =>
+        this.mutate((d) => {
+          d.land!.colors = { ...d.land!.colors, [b.id]: color.value }
+        }),
+      )
+      const n = counts.get(b.id) ?? 0
+      pal.append(
+        h(
+          'div',
+          { class: `mt-item mt-biome${b.id === this.landBiome ? ' mt-on' : ''}` },
+          color,
+          h(
+            'button',
+            {
+              class: 'mt-item-name',
+              onclick: () => {
+                this.landBiome = b.id
+                if (!isLandTool(this.map.tool)) this.setTool('lbrush')
+                else this.renderSide(true)
+              },
+            },
+            biomeName(b.id, grid),
+          ),
+          h('span', { class: 'mt-dim mt-mono' }, n ? `${Math.round((n / graph.n) * 100)}%` : ''),
+          grid.colors?.[b.id]
+            ? h(
+                'button',
+                {
+                  class: 'mt-btn mt-icon-btn',
+                  title: 'Default colour',
+                  onclick: () =>
+                    this.mutate((d) => {
+                      const c = { ...d.land!.colors }
+                      delete c[b.id]
+                      d.land!.colors = c
+                    }),
+                },
+                '↺',
+              )
+            : h('span'),
+        ),
+      )
+    }
+    body.append(h('h4', null, 'Biomes'), pal)
+
+    // Display.
+    const opacity = h('input', { type: 'range', min: '0.1', max: '1', step: '0.05', value: String(this.map.landOpacity), class: 'mt-grow' })
+    opacity.addEventListener('input', () => {
+      this.map.landOpacity = Number(opacity.value)
+      this.map.invalidate()
+    })
+    const onTop = h('input', { type: 'checkbox', checked: this.map.imageOnTop, disabled: !p.image })
+    onTop.addEventListener('change', () => {
+      this.map.imageOnTop = onTop.checked
+      this.map.invalidate()
+    })
+    const symbols = h('input', { type: 'checkbox', checked: grid.symbols !== false })
+    symbols.addEventListener('change', () =>
+      this.mutate((d) => {
+        d.land!.symbols = symbols.checked ? undefined : false
+      }),
+    )
+    body.append(
+      h('h4', null, 'Display'),
+      h('div', { class: 'mt-row' }, h('span', { class: 'mt-dim' }, 'Opacity'), opacity),
+      h('div', { class: 'mt-row mt-wrap' }, h('label', { class: 'mt-check' }, symbols, 'Terrain symbols'), h('label', { class: 'mt-check', title: 'Show the map picture above the land, at its own opacity' }, onTop, 'Picture on top')),
+    )
+
+    body.append(this.landSeedBox(grid))
+
+    body.append(
+      h(
+        'div',
+        { class: 'mt-row' },
+        h('span', { class: 'mt-dim' }, `${graph.n.toLocaleString()} cells`),
+        h('span', { class: 'mt-spacer' }),
+        h(
+          'button',
+          {
+            class: `mt-btn${this.confirmRemoveLand ? ' mt-danger' : ' mt-ghost'}`,
+            onclick: () => {
+              if (!this.confirmRemoveLand) {
+                this.confirmRemoveLand = true
+                return this.renderSide(true)
+              }
+              this.confirmRemoveLand = false
+              if (isLandTool(this.map.tool)) this.setTool('pan')
+              this.mutate((d) => {
+                delete d.land
+              })
+            },
+          },
+          this.confirmRemoveLand ? 'Confirm remove' : 'Remove land grid',
+        ),
+      ),
+    )
+  }
+
+  private landSeedBox(grid: NonNullable<WorldProfile['land']>): HTMLElement {
+    const p = this.profile!
+    const samples = grid.samples ?? []
+    const box = h('details', { class: 'mt-group', open: !!p.image && samples.length < 2 }, h('summary', null, h('span', null, 'Seed from the map picture'), h('span', { class: 'mt-dim' }, samples.length ? ` · ${samples.length} samples` : '')))
+    if (!p.image) {
+      box.append(h('div', { class: 'mt-dim' }, 'Upload a map picture in the Image tab first.'))
+      return box
+    }
+    box.append(
+      h(
+        'div',
+        { class: 'mt-dim' },
+        'Pick a biome above, then Pick colour and click the picture where it shows that biome. Add one sample per look (sea, each forest colour, snow, sand…), then Generate. Cells take the biome of the nearest sample colour.',
+      ),
+      h(
+        'div',
+        { class: 'mt-row mt-wrap' },
+        h('button', { class: `mt-btn${this.map.tool === 'lsample' ? ' mt-on' : ''}`, onclick: () => this.setTool(this.map.tool === 'lsample' ? 'pan' : 'lsample') }, 'Pick colour'),
+        h('span', { class: 'mt-dim' }, `for ${biomeName(this.landBiome, grid)}`),
+      ),
+    )
+    const list = h('div', { class: 'mt-list' })
+    samples.forEach((smp, i) => {
+      list.append(
+        h(
+          'div',
+          { class: 'mt-item' },
+          h('span', { class: 'mt-dot', style: `background:rgb(${smp.rgb.join(',')})`, title: `rgb(${smp.rgb.join(', ')})` }),
+          h('span', null, biomeName(smp.biome, grid)),
+          h('span', { class: 'mt-dot', style: `background:${biomeColor(smp.biome, grid)}` }),
+          h(
+            'button',
+            {
+              class: 'mt-btn mt-icon-btn',
+              title: 'Remove sample',
+              onclick: () =>
+                this.mutate((d) => {
+                  d.land!.samples = (d.land!.samples ?? []).filter((_, j) => j !== i)
+                }),
+            },
+            '×',
+          ),
+        ),
+      )
+    })
+    box.append(list)
+    const num = (key: keyof typeof this.landSeed, min: number, max: number, step: number, label: string, title: string) => {
+      const el = h('input', { class: 'mt-input', type: 'number', min: String(min), max: String(max), step: String(step), value: String(this.landSeed[key]), title })
+      el.addEventListener('change', () => (this.landSeed[key] = Math.max(min, Math.min(max, numOrNull(el.value) ?? this.landSeed[key]))))
+      return [h('label', { title }, label), el]
+    }
+    box.append(
+      h(
+        'div',
+        { class: 'mt-form' },
+        ...num('tolerance', 20, 600, 10, 'Tolerance', 'How far a colour may be from every sample before the cell takes its neighbours’ biome instead (labels, ships, ink)'),
+        ...num('smooth', 0, 4, 1, 'Smoothing', 'Passes of the majority filter that clears speckle'),
+        ...num('minRegion', 1, 200, 1, 'Min island', 'Islands and lakes smaller than this many cells merge into their surroundings'),
+      ),
+      h(
+        'div',
+        { class: 'mt-row' },
+        h(
+          'button',
+          {
+            class: 'mt-btn mt-primary',
+            disabled: samples.length < 2,
+            title: samples.length < 2 ? 'Add at least two samples (e.g. sea and land)' : 'Replace every cell on the picture with the nearest sample’s biome',
+            onclick: () => this.seedLand(),
+          },
+          'Generate',
+        ),
+        h('span', { class: 'mt-dim' }, 'Undo restores the previous paint.'),
+      ),
+    )
+    return box
+  }
+
+  private ensureSampler(): Sampler | null {
+    if (!this.sampler && this.picture) this.sampler = makeSampler(this.picture)
+    return this.sampler
+  }
+
+  private seedLand(): void {
+    const p = this.profile
+    if (!p?.land || !p.image) return
+    const sampler = this.ensureSampler()
+    if (!sampler) return this.warn('The map picture is still loading.')
+    const out = seedFromImage(p.land, p.image, sampler, this.landSeed)
+    this.mutate((d) => {
+      d.land!.biome = encodeBytes(out)
+    })
+    if (this.map.imageOnTop) {
+      this.map.imageOnTop = false
+      this.renderSide(true)
+    }
+  }
+
+  private onLand(tool: LandTool, phase: 'down' | 'move' | 'end', x: number, y: number, e: { altKey: boolean; shiftKey: boolean }): void {
+    const p = this.profile
+    const grid = p?.land
+    if (!p || !grid) return
+    const graph = graphFor(grid)
+    if (tool === 'lsample') {
+      if (phase !== 'down') return
+      const meta = p.image
+      const sampler = this.ensureSampler()
+      if (!meta || !sampler) return this.warn('Upload a map picture first.')
+      const at = worldToImage(meta.calib, x, y)
+      const col = colorAt(sampler, at.px, at.py, 2)
+      if (!col) return this.warn('Click on the picture.')
+      const rgb = col.map((v) => Math.round(v)) as [number, number, number]
+      this.mutate((d) => {
+        d.land!.samples = [...(d.land!.samples ?? []), { biome: this.landBiome, rgb }]
+      })
+      return
+    }
+    const target = this.landBiome
+    const allowed = (current: number) => !this.landKeepCoast || isWater(current) === isWater(target)
+    if (tool === 'lfill') {
+      if (phase !== 'down') return
+      const values = new Uint8Array(biomesOf(grid, graph))
+      const start = findCell(graph, x, y)
+      if (values[start] === target) return
+      for (const c of floodCells(graph, values, start)) values[c] = target
+      this.mutate((d) => {
+        d.land!.biome = encodeBytes(values)
+      })
+      return
+    }
+    // Brush.
+    if (phase === 'down' && e.altKey) {
+      const b = this.map.land.biomeAt(grid, x, y)
+      if (b !== null) {
+        this.landBiome = b
+        this.renderSide(true)
+      }
+      this.landStroke = null
+      return
+    }
+    if (phase === 'down') {
+      this.landStroke = new Uint8Array(biomesOf(grid, graph))
+      this.editGroup = `land-${Date.now()}`
+    }
+    const stroke = this.landStroke
+    if (!stroke) return
+    if (phase !== 'end') {
+      let changed = false
+      for (const c of cellsWithin(graph, x, y, this.map.brushPx * this.map.unitsPerPx())) {
+        if (stroke[c] === target || !allowed(stroke[c])) continue
+        stroke[c] = target
+        changed = true
+      }
+      if (changed && !this.landFrame) {
+        this.landFrame = requestAnimationFrame(() => {
+          this.landFrame = 0
+          if (this.landStroke) this.commitStroke(false)
+        })
+      }
+      return
+    }
+    if (this.landFrame) cancelAnimationFrame(this.landFrame)
+    this.landFrame = 0
+    this.commitStroke(true)
+    this.landStroke = null
+    this.editGroup = null
+  }
+
+  private commitStroke(final: boolean): void {
+    const stroke = this.landStroke
+    if (!stroke || !this.profile?.land) return
+    const encoded = encodeBytes(stroke)
+    if (encoded === this.profile.land.biome) {
+      if (final) this.renderSide()
+      return
+    }
+    this.mutate((d) => {
+      d.land!.biome = encoded
+    }, final)
+  }
 
   private renderLayersTab(body: HTMLElement): void {
     const p = this.profile!

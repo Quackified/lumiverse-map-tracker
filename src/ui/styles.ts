@@ -195,6 +195,8 @@ textarea.mt-input { height: auto; padding: 6px 8px; resize: vertical; width: 100
 .mt-item.mt-on { background: color-mix(in srgb, var(--mt-primary) 16%, transparent); }
 .mt-item.mt-muted { opacity: .5; }
 .mt-moved { color: var(--mt-primary); }
+.mt-item.mt-biome { grid-template-columns: 22px minmax(0, 1fr) auto auto; }
+.mt-biome .mt-color { width: 20px; height: 18px; padding: 0; border: 0; background: none; cursor: pointer; }
 .mt-conv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 6px; align-items: start; padding: 4px 0; border-top: 1px solid var(--mt-border); }
 .mt-conv-line { font-family: var(--mt-mono, ui-monospace, monospace); font-size: 11px; white-space: pre-wrap; word-break: break-word; }
 .mt-del { color: var(--mt-danger); text-decoration: line-through; }

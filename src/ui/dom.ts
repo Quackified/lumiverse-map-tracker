@@ -1,0 +1,96 @@
+type Child = Node | string | number | null | undefined | false
+type Attrs = Record<string, unknown> & { class?: string; style?: string; dataset?: Record<string, string> }
+
+/** Tiny element builder: h('button', { class: 'x', onclick }, 'Label'). */
+export function h<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  attrs: Attrs | null = null,
+  ...children: (Child | Child[])[]
+): HTMLElementTagNameMap[K] {
+  const el = document.createElement(tag)
+  if (attrs) {
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v === undefined || v === null || v === false) continue
+      if (k === 'class') el.className = String(v)
+      else if (k === 'style') el.setAttribute('style', String(v))
+      else if (k === 'dataset') Object.assign(el.dataset, v)
+      else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v as EventListener)
+      else if (k in el && typeof v !== 'string') (el as unknown as Record<string, unknown>)[k] = v
+      else el.setAttribute(k, v === true ? '' : String(v))
+    }
+  }
+  for (const c of children.flat()) {
+    if (c === null || c === undefined || c === false) continue
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)))
+  }
+  return el
+}
+
+export function clear(el: Element): void {
+  while (el.firstChild) el.removeChild(el.firstChild)
+}
+
+export function numOrNull(v: string): number | null {
+  if (v.trim() === '') return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
+/** Stable pleasant hue for a string. */
+export function hueOf(s: string): number {
+  let hsh = 2166136261
+  for (let i = 0; i < s.length; i++) hsh = Math.imul(hsh ^ s.charCodeAt(i), 16777619)
+  return Math.abs(hsh) % 360
+}
+
+export function debounce<A extends unknown[]>(fn: (...a: A) => void, ms: number): ((...a: A) => void) & { flush(): void; cancel(): void } {
+  let t: ReturnType<typeof setTimeout> | null = null
+  let last: A | null = null
+  const run = (...a: A) => {
+    last = a
+    if (t) clearTimeout(t)
+    t = setTimeout(() => {
+      t = null
+      if (last) fn(...last)
+    }, ms)
+  }
+  run.flush = () => {
+    if (t) {
+      clearTimeout(t)
+      t = null
+      if (last) fn(...last)
+    }
+  }
+  run.cancel = () => {
+    if (t) clearTimeout(t)
+    t = null
+  }
+  return run
+}
+
+export const ICONS = {
+  map: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg>',
+  pan: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/></svg>',
+  me: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3.2" fill="currentColor"/><circle cx="12" cy="12" r="8"/></svg>',
+  flag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>',
+  pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6-5.5-6-11a6 6 0 1 1 12 0c0 5.5-6 11-6 11z"/><path d="M12 7v6M9 10h6"/></svg>',
+  ruler: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 17 14-14 4 4L7 21z"/><path d="m7 13 2 2M10 10l2 2M13 7l2 2"/></svg>',
+  layers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/></svg>',
+  fit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>',
+  plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  minus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>',
+  side: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>',
+  snap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M11 4v16M11 12h10"/></svg>',
+  dock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16"/></svg>',
+  popout: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M20 4l-8 8M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>',
+  close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+  crop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 2v16h16M2 6h16v16"/></svg>',
+  zone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="3 2"><rect x="4" y="5" width="16" height="14" rx="1"/></svg>',
+}
+
+export function icon(name: keyof typeof ICONS): HTMLSpanElement {
+  const span = document.createElement('span')
+  span.className = 'mt-ico'
+  span.innerHTML = ICONS[name]
+  return span
+}

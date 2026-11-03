@@ -464,12 +464,12 @@ describe('moving places', () => {
     }
   })
 
-  it('publishes coordinates as one JSON variable that getgvarkey can read', () => {
+  it('publishes coordinates as one JSON variable that getchatvarkey can read', () => {
     expect(placesVarName('Endwright')).toBe('endwright_places')
     expect(placesVarName('Articfic Realm!')).toBe('articfic_realm_places')
     const value = JSON.parse(placesVarValue([poi('shackle-city', 'Shackle City', -20, 60), poi('x', 'X', 0.5, -0)]))
     expect(value).toEqual({ 'shackle-city': '(-20, 60)', x: '(0.5, 0)' })
-    expect(placeRef('endwright_places', 'shackle-city')).toBe('{{getgvarkey::endwright_places::shackle-city}}')
-    expect(placeRef('v', '2024')).toBe('{{getgvarkey::v::["2024"]}}')
+    expect(placeRef('endwright_places', 'shackle-city')).toBe('{{getchatvarkey::endwright_places::shackle-city}}')
+    expect(placeRef('v', '2024')).toBe('{{getchatvarkey::v::["2024"]}}')
   })
 })

@@ -881,7 +881,7 @@ export class MapApp {
     renderList()
   }
 
-  /** Publish place coordinates to a global variable that lorebook entries read. */
+  /** Publish place coordinates to a chat variable that lorebook entries read. */
   private placesVarBox(p: WorldProfile): HTMLElement {
     const on = !!p.placesVar
     const name = h('input', { class: 'mt-input mt-grow mt-mono', value: p.placesVar ?? placesVarName(p.name), spellcheck: false })
@@ -903,12 +903,12 @@ export class MapApp {
       'details',
       { class: 'mt-group', open: on },
       h('summary', null, h('span', null, 'Lorebook variable'), h('span', { class: 'mt-dim' }, on ? ` · ${p.placesVar}` : ' · off')),
-      h('label', { class: 'mt-check' }, check, 'Publish coordinates to a global variable'),
+      h('label', { class: 'mt-check' }, check, 'Publish coordinates to a chat variable'),
       h('div', { class: 'mt-row' }, name),
       h(
         'div',
         { class: 'mt-dim' },
-        'Each place is stored as "(x, y)" under its id and updates as you move places. A lorebook entry reads one with ',
+        'Written into every chat that uses this map, as "(x, y)" under each place id, and kept current as you move places. A lorebook entry reads one with ',
         h('span', { class: 'mt-var' }, placeRef(name.value || 'map_places', sample?.id ?? 'place-id')),
         '. Copy reference on a place gives its exact macro.',
       ),

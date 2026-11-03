@@ -97,13 +97,15 @@ The lorebook gathers your places; the map owns where they are.
 
 ### Lorebook variable
 
-Turn on **Lorebook variable** in the Points tab to publish every place's coordinates to one global variable (default `<map name>_places`, e.g. `endwright_places`). It holds `{"shackle-city": "(-20, 60)", ...}` and updates whenever a place moves. A lorebook entry reads a place with:
+Turn on **Lorebook variable** in the Points tab to publish every place's coordinates to one chat variable (default `<map name>_places`, e.g. `endwright_places`). It holds `{"shackle-city": "(-20, 60)", ...}`, is written into each chat that uses the map when the chat is opened, and updates whenever a place moves. A lorebook entry reads a place with:
 
 ```
-Shackle City {{getgvarkey::endwright_places::shackle-city}} sits on the trade road.
+Shackle City {{getchatvarkey::endwright_places::shackle-city}} sits on the trade road.
 ```
 
-Lumiverse fills that in when the entry is injected into the prompt, so entries stay current without being rewritten. These are built-in macros, so they still work with Map Tracker disabled (the last published value stays). **Copy reference** on a place copies its exact macro.
+Lumiverse fills that in when the entry is injected into the prompt, so entries stay current without being rewritten. These are built-in macros, so a chat keeps its last value with Map Tracker disabled. **Copy reference** on a place copies its exact macro.
+
+It is a chat variable rather than a global one because Lumiverse's prompt assembly reads `{{getgvar}}` values from the chat's own copy, which an extension cannot update.
 
 ## Map layers (shapes)
 

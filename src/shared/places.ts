@@ -2,8 +2,8 @@ import type { Poi } from './types'
 
 // Places moved on the map remember where the lorebook put them (`origin`), so the
 // map can own the coordinates while the lorebook stays the gathering point. The
-// map's coordinates are published as one global JSON variable that lorebook
-// entries read with {{getgvarkey::<var>::<place id>}}.
+// map's coordinates are published as one JSON chat variable that lorebook
+// entries read with {{getchatvarkey::<var>::<place id>}}.
 
 /** Default variable name for a map: "Endwright" → "endwright_places". */
 export function placesVarName(mapName: string): string {
@@ -40,7 +40,7 @@ function pathFor(id: string): string {
 
 /** The macro a lorebook entry uses to read a place's coordinates. */
 export function placeRef(varName: string, id: string): string {
-  return `{{getgvarkey::${varName}::${pathFor(id)}}}`
+  return `{{getchatvarkey::${varName}::${pathFor(id)}}}`
 }
 
 const same = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.abs(a.x - b.x) < 1e-9 && Math.abs(a.y - b.y) < 1e-9

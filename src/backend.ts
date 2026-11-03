@@ -144,22 +144,22 @@ function sanitizeProfile(p: WorldProfile): WorldProfile {
 async function saveProfile(p: WorldProfile, userId?: string): Promise<WorldProfile> {
   const clean = sanitizeProfile(p)
   await writeJson(profilePath(clean.id), clean, userId)
-  await publishPlaces(clean, userId)
   return clean
 }
 
-// Last value written per variable, so saves that don't move places don't rewrite it.
-const publishedPlaces = new Map<string, string>()
-
-/** Write the map's place coordinates to its global variable, read by lorebook entries via {{getgvarkey}}. */
-async function publishPlaces(p: WorldProfile, userId?: string): Promise<void> {
-  if (!p.placesVar) return
+/**
+ * Write the map's place coordinates into a chat's variables, where lorebook
+ * entries read them with {{getchatvarkey::<var>::<place id>}}. A chat variable
+ * rather than a global one: prompt assembly reads global macro variables from
+ * the chat's own copy, so a global written through the extension API never
+ * reaches the prompt. Compared against the stored value each time, since a
+ * generation or a checkpoint restore can write an older copy back.
+ */
+async function publishPlaces(chatId: string, p: WorldProfile | null): Promise<void> {
+  if (!p?.placesVar) return
   const value = placesVarValue(p.points)
-  const key = `${userId ?? ''}:${p.placesVar}`
-  if (publishedPlaces.get(key) === value) return
   try {
-    await spindle.variables.global.set(p.placesVar, value, userId)
-    publishedPlaces.set(key, value)
+    if ((await spindle.variables.chat.get(chatId, p.placesVar)) !== value) await spindle.variables.chat.set(chatId, p.placesVar, value)
   } catch (err) {
     spindle.log.warn(`[Map Tracker] Could not write the ${p.placesVar} variable: ${String(err)}`)
   }
@@ -210,10 +210,9 @@ function chatProfileId(chat: ChatMapState | null, settings: StoredSettings): str
   return chat?.profileId || settings.defaultProfileId || null
 }
 
-async function contextFor(chat: ChatMapState, settings: StoredSettings, userId?: string): Promise<string> {
+async function contextFor(chat: ChatMapState, settings: StoredSettings, userId?: string, profile?: WorldProfile | null): Promise<string> {
   if (settings.injectMode === 'off') return ''
-  const profile = await loadProfile(chatProfileId(chat, settings), userId)
-  return buildContext(profile, chat, settings)
+  return buildContext(profile !== undefined ? profile : await loadProfile(chatProfileId(chat, settings), userId), chat, settings)
 }
 
 async function saveChat(chat: ChatMapState, userId?: string): Promise<void> {
@@ -226,8 +225,10 @@ async function saveChat(chat: ChatMapState, userId?: string): Promise<void> {
 }
 
 async function refreshContext(chat: ChatMapState, settings: StoredSettings, userId?: string): Promise<string> {
-  const text = await contextFor(chat, settings, userId)
+  const profile = await loadProfile(chatProfileId(chat, settings), userId)
+  const text = await contextFor(chat, settings, userId, profile)
   await setVar(chat.chatId, VAR.text, text || null)
+  await publishPlaces(chat.chatId, profile)
   if (userState(userId).activeChatId === chat.chatId) spindle.updateMacroValue('map_pos', text)
   return text
 }

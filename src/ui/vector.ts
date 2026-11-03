@@ -58,12 +58,26 @@ const AREA_FILL: Record<string, string> = {
 }
 const AREA_STROKE: Record<string, string> = { land: '#5b4a2c', lake: '#2f5b6e', contour: '#7a5d3a' }
 const LINE_STYLE: Record<string, { color: string; width: number; dash?: number[] }> = {
-  mountains: { color: '#6b5a45', width: 2.5 },
+  mountains: { color: '#4a3b2a', width: 2.5 },
   river: { color: '#4f9ed8', width: 2.5 },
   road: { color: '#a07850', width: 1.6, dash: [6, 4] },
   coast: { color: '#3b2f1d', width: 1.6 },
   contour: { color: '#7a5d3a', width: 1.1 },
   wall: { color: '#8b8b8b', width: 3 },
+}
+
+function hashString(s: string): number {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619)
+  return h >>> 0
+}
+
+/** A stable pseudo-random number in [0, 1) for a seed and two integers. */
+function hash01(seed: number, a: number, b: number): number {
+  let h = Math.imul(seed ^ Math.imul(a, 0x9e3779b1), 0x85ebca6b) ^ Math.imul(b + 1, 0xc2b2ae35)
+  h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d)
+  h ^= h >>> 13
+  return (h >>> 0) / 4294967296
 }
 
 /** Elevation colour ramp: lowland green → highland brown → snowcap. */
@@ -220,6 +234,10 @@ export class VectorEditor {
       g.stroke()
     } else if (f.geom === 'line') {
       const st = LINE_STYLE[f.type] ?? { color: f.color ?? c.text, width: 2 }
+      if (f.type === 'mountains') {
+        this.mountainRange(g, f, f.color ?? st.color)
+        return
+      }
       g.beginPath()
       this.path(g, f.rings[0], false, smooth)
       g.strokeStyle = f.color ?? st.color
@@ -229,41 +247,135 @@ export class VectorEditor {
       g.setLineDash(st.dash ?? [])
       g.stroke()
       g.setLineDash([])
-      if (f.type === 'mountains') this.mountainGlyphs(g, f.rings[0], f.color ?? st.color)
     } else {
       const s = this.host.toScreen(f.rings[0][0][0], f.rings[0][0][1])
       this.glyph(g, f.type, s.x, s.y, 9 * (f.size ?? 1), f.color, c)
     }
   }
 
-  /** Little peaks along a mountain range's ridge line. */
-  private mountainGlyphs(g: CanvasRenderingContext2D, ring: Ring, color: string): void {
-    const pts = ring.map(([x, y]) => this.host.toScreen(x, y))
-    const STEP = 16
-    let carry = STEP / 2
-    g.save()
-    g.fillStyle = '#d9cdb4'
-    g.strokeStyle = color
-    g.lineWidth = 1.4
-    for (let i = 1; i < pts.length; i++) {
-      const a = pts[i - 1]
-      const b = pts[i]
-      const len = Math.hypot(b.x - a.x, b.y - a.y)
-      for (let d = carry; d < len; d += STEP) {
-        const x = a.x + ((b.x - a.x) * d) / len
-        const y = a.y + ((b.y - a.y) * d) / len
-        g.beginPath()
-        g.moveTo(x - 6, y + 4)
-        g.lineTo(x, y - 7)
-        g.lineTo(x + 6, y + 4)
-        g.closePath()
-        g.fill()
-        g.stroke()
+  /**
+   * A mountain range: a band of overlapping, shaded peaks along the ridge line,
+   * tallest along the crest and toward the middle of the range. Peaks have a real
+   * size in world units (Size scales it), so zooming in shows a wide range rather
+   * than a row of ticks; zoomed far out they thin out instead of shrinking to dust.
+   * Jitter comes from the feature id, so peaks hold still while panning.
+   */
+  private mountainRange(g: CanvasRenderingContext2D, f: Feature, ink: string): void {
+    const ring = f.rings[0]
+    if (ring.length < 2) return
+    const k = this.host.scale()
+    const size = f.size ?? 1
+    const base = 5.5 * size
+    let step = base
+    while (step * k < 9) step *= 2
+    const w = step * k
+    const rows = step === base ? [0, -1, 1, -2, 2] : [0, -1, 1]
+    const lens = [0]
+    for (let i = 1; i < ring.length; i++) lens.push(lens[i - 1] + Math.hypot(ring[i][0] - ring[i - 1][0], ring[i][1] - ring[i - 1][1]))
+    const total = lens[lens.length - 1]
+    if (total <= 0) return
+    const seed = hashString(f.id)
+    const rnd = (i: number, row: number, salt: number) => hash01(seed, i * 7 + row + 3, salt)
+    const peaks: { x: number; y: number; h: number; b: number; lean: number }[] = []
+    const count = Math.max(1, Math.round(total / step))
+    let seg = 1
+    for (let i = 0; i < count; i++) {
+      const s = ((i + 0.5) / count) * total
+      while (seg < ring.length - 1 && lens[seg] < s) seg++
+      const [x0, y0] = ring[seg - 1]
+      const [x1, y1] = ring[seg]
+      const t = (s - lens[seg - 1]) / (lens[seg] - lens[seg - 1] || 1)
+      const p = this.host.toScreen(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
+      const q = this.host.toScreen(x1, y1)
+      const o = this.host.toScreen(x0, y0)
+      const len = Math.hypot(q.x - o.x, q.y - o.y) || 1
+      const tx = (q.x - o.x) / len
+      const ty = (q.y - o.y) / len
+      const crest = Math.sin((Math.PI * s) / total)
+      for (const row of rows) {
+        const off = Math.abs(row)
+        if (off && rnd(i, row, 0) < (off === 1 ? 0.2 : 0.45)) continue
+        const along = (rnd(i, row, 1) - 0.5) * w * 0.7
+        const across = row * w * (0.5 + rnd(i, row, 2) * 0.25)
+        const h = w * (off === 0 ? 1.05 + crest * 0.55 : off === 1 ? 0.75 + crest * 0.3 : 0.55 + crest * 0.15) * (0.8 + rnd(i, row, 3) * 0.45)
+        peaks.push({
+          x: p.x + tx * along - ty * across,
+          y: p.y + ty * along + tx * across,
+          h,
+          b: h * (0.72 + rnd(i, row, 4) * 0.3),
+          lean: (rnd(i, row, 5) - 0.5) * 0.4,
+        })
       }
-      carry = (carry - len) % STEP
-      if (carry < 0) carry += STEP
     }
+    peaks.sort((a, b) => a.y - b.y)
+    g.save()
+    g.lineJoin = 'round'
+    g.lineCap = 'round'
+    g.lineWidth = Math.max(0.8, Math.min(2, w / 14))
+    for (const pk of peaks) this.peak(g, pk.x, pk.y, pk.h, pk.b, pk.lean, pk.h > w * 1.35, ink)
     g.restore()
+  }
+
+  /** One peak: sunlit west face, shaded east face, a crease, and a snowcap on the tall ones. */
+  private peak(g: CanvasRenderingContext2D, x: number, y: number, h: number, b: number, lean: number, snow: boolean, ink: string): void {
+    const ax = x + lean * b
+    const ay = y - h
+    const silhouette = () => {
+      g.moveTo(x - b, y)
+      g.quadraticCurveTo(x - b * 0.42, y - h * 0.62, ax, ay)
+      g.quadraticCurveTo(x + b * 0.48, y - h * 0.55, x + b, y)
+    }
+    const creaseX = x + b * 0.12
+    g.beginPath()
+    silhouette()
+    g.closePath()
+    g.fillStyle = '#e7d8b6'
+    g.fill()
+    // Shadow face, east of the crease.
+    g.beginPath()
+    g.moveTo(ax, ay)
+    g.quadraticCurveTo(x + b * 0.48, y - h * 0.55, x + b, y)
+    g.lineTo(creaseX, y)
+    g.quadraticCurveTo(x + b * 0.02 + lean * b * 0.4, y - h * 0.5, ax, ay)
+    g.fillStyle = '#a58b67'
+    g.fill()
+    if (snow) {
+      const d = 0.3
+      const lx = ax + (x - b - ax) * d
+      const rx = ax + (x + b - ax) * d
+      const sy = ay + h * d
+      g.beginPath()
+      g.moveTo(ax, ay)
+      g.lineTo(rx, sy)
+      g.lineTo(ax + (rx - ax) * 0.45, sy - h * 0.06)
+      g.lineTo(ax + (creaseX - ax) * d, sy + h * 0.04)
+      g.lineTo(ax + (lx - ax) * 0.5, sy - h * 0.07)
+      g.lineTo(lx, sy)
+      g.closePath()
+      g.fillStyle = '#f8f9fb'
+      g.fill()
+      g.beginPath()
+      g.moveTo(ax, ay)
+      g.lineTo(rx, sy)
+      g.lineTo(ax + (rx - ax) * 0.45, sy - h * 0.06)
+      g.lineTo(ax + (creaseX - ax) * d, sy + h * 0.04)
+      g.closePath()
+      g.fillStyle = '#cdd6dd'
+      g.fill()
+    }
+    g.beginPath()
+    silhouette()
+    g.strokeStyle = ink
+    g.stroke()
+    // Crease and a short ground stroke on the shaded side.
+    g.globalAlpha *= 0.55
+    g.beginPath()
+    g.moveTo(ax, ay)
+    g.quadraticCurveTo(x + b * 0.02 + lean * b * 0.4, y - h * 0.5, creaseX, y - h * 0.08)
+    g.moveTo(x + b * 0.7, y)
+    g.lineTo(x + b * 1.25, y)
+    g.stroke()
+    g.globalAlpha /= 0.55
   }
 
   /** Built-in symbols for spot features. */

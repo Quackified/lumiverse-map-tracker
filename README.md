@@ -46,6 +46,10 @@ The layout follows image editors such as Photoshop or Affinity:
 - **Layers** (right): the story overlays (Places, Labels, Trail, Zones, Regions) as toggle chips; the eye shows or hides, the label opens the list. Below them, the drawn layers as one stack, top first: Features (Landmarks, Nature, Topography, Outlines, each with a lock), Decorations, Terrain and Picture. Click a layer to edit it in Properties; its opacity is the slim slider under the stack. The coordinate grid is a view toggle in the top bar. Click a layer to edit it in Properties.
 - **Properties** (right, below Layers): the content behind the chosen layer or the active tool: the places list and editor, zones, the selected shape, the biome palette and seeding, or the picture's crop and calibration.
 
+## What the model is told
+
+With a position set, the context includes the map, the position with its zone and region, and (with **Describe the terrain and landscape** on, in Story) the terrain underfoot, the nearest coast (or nearest land at sea) and the most notable landscape nearby, such as an active volcano, mountains or glacier spires with their distance and direction. Then nearby places, the destination and the scale.
+
 ## Map fields in lorebook entries (preferred)
 
 When lorebook entries carry structured map data in `extensions.map`, the **Import** tab offers **Use map data** for the whole lorebook. A lorebook export (`.json`) with map fields also works through **Import JSON**. The format follows GeoJSON ordering, x first:
@@ -169,6 +173,10 @@ Once places live on the map, the coordinates written into entries can point at i
 - Hovering shows the biome under the cursor. Every stroke can be undone.
 
 Cells and biomes are adapted from [Azgaar's Fantasy Map Generator](https://github.com/Azgaar/Fantasy-Map-Generator) (MIT, © Max Haniyeu): the jittered lattice and Voronoi graph, the region outline tracing, and the default biome set and colours.
+
+## Place cards
+
+Click a place with the hand tool to open its card next to it: name and group, coordinates and how far and which way it is from you, its note, and the text of its lorebook entry (the entry whose title matches, or the one that mentions it; macro references show as coordinates). Pick the lorebook once per map from the card. **Set as destination**, **Move me here**, **Edit** and **Copy reference** are on the card; Esc or a click on empty map closes it.
 
 ## Decorations
 

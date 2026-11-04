@@ -222,6 +222,13 @@ export class MapApp {
   private toolButtons = new Map<Tool, HTMLButtonElement>()
   private hint: HTMLDivElement
   private menu: HTMLDivElement
+  /** The place card: a clicked place's details and lorebook entry, next to it on the map. */
+  private card: HTMLDivElement
+  private cardPoi: string | null = null
+  /** Lorebook entries already fetched, by book, for place cards. */
+  private bookEntries = new Map<string, WorldBookEntryLite[]>()
+  private booksAsked = false
+  private entriesAsked = new Set<string>()
   private sideDirty = false
   private editingPoi: string | null = null
   private editingZone: string | null = null
@@ -324,7 +331,9 @@ export class MapApp {
     this.hint.hidden = true
     this.menu = h('div', { class: 'mt-menu' })
     this.menu.hidden = true
-    this.map.el.append(this.hint, this.menu)
+    this.card = h('div', { class: 'mt-card' })
+    this.card.hidden = true
+    this.map.el.append(this.hint, this.menu, this.card)
 
     this.profileSelect = h('select', { class: 'mt-select mt-profile', title: 'Map', onchange: () => this.onProfileChange() })
     this.toolbar = this.buildToolbar()
@@ -433,6 +442,11 @@ export class MapApp {
       if (e.altKey || e.repeat) return
       if (k === 'escape' && this.dialog) {
         this.closeDialog()
+        return
+      }
+      if (k === 'escape' && this.cardPoi) {
+        this.cardPoi = null
+        this.renderCard()
         return
       }
       const hit = !e.shiftKey && RAIL.flat().find((r) => r.key === k)
@@ -547,10 +561,13 @@ export class MapApp {
         break
       case 'worldBooks':
         this.books = msg.books
+        if (this.cardPoi) setTimeout(() => this.renderCard(), 0)
         this.entries = []
         this.renderSide(true)
         break
       case 'worldBookEntries':
+        this.bookEntries.set(msg.bookId, msg.entries)
+        if (this.cardPoi) this.renderCard()
         if (msg.bookId !== this.bookId) this.convert = null
         this.bookId = msg.bookId
         this.entries = msg.entries
@@ -836,9 +853,104 @@ export class MapApp {
   }
 
   private onSelectPoi(poi: Poi | null): void {
+    // A plain click on a place (hand tool) opens its card; clicking empty map closes it.
+    if (this.map.tool === 'pan') {
+      this.cardPoi = poi?.id ?? null
+      this.renderCard()
+    }
     if (!poi) return
     this.editingPoi = poi.id
     if (this.panel === 'points') this.renderSide(true)
+  }
+
+  /** The place card: name and group, where it is from you, its lorebook entry, and what you can do with it. */
+  private renderCard(): void {
+    const p = this.profile
+    const poi = p?.points.find((q) => q.id === this.cardPoi)
+    clear(this.card)
+    this.card.hidden = !poi
+    if (!p || !poi) return
+    const chatId = this.chatId()
+    const me = this.state?.chat?.pos
+    const close = () => {
+      this.cardPoi = null
+      this.renderCard()
+    }
+    const action = (label: string, fn: () => void, disabled = false) => h('button', { class: 'mt-btn', disabled, onclick: fn }, label)
+    const where = [formatCoord(poi.x, poi.y)]
+    if (me) {
+      const units = distanceUnits(me.x, me.y, poi.x, poi.y)
+      where.push(units < 0.5 ? 'you are here' : `${formatKm(units * p.unitKm)} ${compass(bearing(me.x, me.y, poi.x, poi.y))} of you`)
+    }
+    this.card.append(
+      h(
+        'div',
+        { class: 'mt-card-head' },
+        h('div', { class: 'mt-card-title' }, h('b', null, poi.name), poi.group ? h('span', { class: 'mt-dim' }, poi.group) : ''),
+        h('button', { class: 'mt-btn mt-icon-btn', title: 'Close (Esc)', onclick: close }, icon('close')),
+      ),
+      h('div', { class: 'mt-dim mt-mono' }, where.join(' \u00b7 ')),
+      poi.note ? h('p', { class: 'mt-card-note' }, poi.note) : '',
+      this.cardLore(p, poi),
+      h(
+        'div',
+        { class: 'mt-row mt-wrap' },
+        action('Set as destination', () => chatId && this.send({ type: 'setDest', chatId, dest: { name: poi.name, x: poi.x, y: poi.y } }), !chatId),
+        action('Move me here', () => chatId && this.send({ type: 'setPos', chatId, x: poi.x, y: poi.y }), !chatId),
+        action('Edit', () => {
+          this.editingPoi = poi.id
+          this.openPanel('points')
+        }),
+        action('Copy reference', () => this.copyRef(poi)),
+      ),
+    )
+    // Beside the place, kept inside the map.
+    const at = this.map.toScreen(poi.x, poi.y)
+    const mw = this.map.el.clientWidth
+    const mh = this.map.el.clientHeight
+    const cw = this.card.offsetWidth
+    const ch = this.card.offsetHeight
+    this.card.style.left = `${Math.max(8, Math.min(at.x + 16 + cw > mw - 8 ? at.x - cw - 16 : at.x + 16, mw - cw - 8))}px`
+    this.card.style.top = `${Math.max(8, Math.min(at.y - 24, mh - ch - 8))}px`
+  }
+
+  /** The lorebook entry that belongs to a place: its title matches, or it mentions the place. */
+  private cardLore(p: WorldProfile, poi: Poi): HTMLElement | string {
+    if (!this.state?.worldBooksAvailable) return ''
+    const book = p.placesBook
+    if (!book) {
+      if (!this.books.length && !this.booksAsked) {
+        this.booksAsked = true
+        this.send({ type: 'listWorldBooks' })
+      }
+      const sel = h('select', { class: 'mt-select mt-grow' }, h('option', { value: '' }, 'Show entries from a lorebook\u2026'), ...this.books.map((b) => h('option', { value: b.id }, b.name)))
+      sel.addEventListener('change', () => sel.value && this.mutate((d) => (d.placesBook = sel.value), false))
+      return h('div', { class: 'mt-row' }, sel)
+    }
+    const entries = this.bookEntries.get(book)
+    if (!entries) {
+      if (!this.entriesAsked.has(book)) {
+        this.entriesAsked.add(book)
+        this.send({ type: 'listWorldBookEntries', bookId: book })
+      }
+      return h('div', { class: 'mt-dim' }, 'Reading the lorebook\u2026')
+    }
+    const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+    const name = norm(poi.name)
+    const entry =
+      entries.find((e) => norm(e.name) === name) ??
+      entries.find((e) => norm(e.name).includes(name) || name.includes(norm(e.name) || '\u0000')) ??
+      entries.find((e) => norm(e.content).includes(name))
+    const change = h('button', { class: 'mt-link', onclick: () => this.mutate((d) => delete d.placesBook, false) }, 'change lorebook')
+    if (!entry) return h('div', { class: 'mt-dim' }, 'No lorebook entry mentions this place (', change, ').')
+    let text = resolveRefs(entry.content, p).replace(/\s+/g, ' ').trim()
+    // When the entry is about something bigger, show the part that mentions the place.
+    if (norm(entry.name) !== name) {
+      const at = text.toLowerCase().indexOf(poi.name.toLowerCase())
+      if (at > 120) text = `\u2026${text.slice(at - 80)}`
+    }
+    if (text.length > 600) text = `${text.slice(0, 600).replace(/\s+\S*$/, '')}\u2026`
+    return h('div', { class: 'mt-card-lore' }, h('div', { class: 'mt-dim' }, `From \u201c${entry.name}\u201d \u00b7 `, change), h('p', null, text))
   }
 
   private onPoiMove(id: string, x: number, y: number, phase: 'move' | 'end'): void {
@@ -906,6 +1018,7 @@ export class MapApp {
   // ── Render ────────────────────────────────────────────────────────────────
 
   private render(): void {
+    if (this.cardPoi) this.renderCard()
     this.renderToolbar()
     this.renderOptions()
     this.renderStatus()
@@ -1380,6 +1493,12 @@ export class MapApp {
         { class: 'mt-check' },
         h('input', { type: 'checkbox', checked: s.settings.askReport, onchange: (e: Event) => this.send({ type: 'saveSettings', settings: { askReport: (e.target as HTMLInputElement).checked } }) }),
         'Ask the model to report moves with <map-pos>x,y</map-pos>',
+      ),
+      h(
+        'label',
+        { class: 'mt-check', title: 'The biome underfoot, the nearest coast, and volcanoes, mountains, forests and the like around the position' },
+        h('input', { type: 'checkbox', checked: s.settings.describeTerrain !== false, onchange: (e: Event) => this.send({ type: 'saveSettings', settings: { describeTerrain: (e.target as HTMLInputElement).checked } }) }),
+        'Describe the terrain and landscape around the position',
       ),
       h('div', { class: 'mt-row' }, h('span', { class: 'mt-grow' }, 'Nearby places listed'), nearIn),
       h('div', { class: 'mt-dim' }, 'Macros: ', h('code', null, '{{map_pos}}'), ' (active chat) · ', h('code', null, '{{@map_pos}}'), ' (chat variable)'),

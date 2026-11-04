@@ -1,4 +1,5 @@
 import type { Bounds, CalibPin, Calibration, Rect, ChatMapState, LegacyCalibration, Poi, Settings, WorldProfile, Zone } from './types'
+import { describeSurroundings } from './surroundings'
 
 const COMPASS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']
 
@@ -250,7 +251,7 @@ export function normalizeCalib(c: unknown, width = 1000, height = 1000, bounds?:
 export function buildContext(
   profile: WorldProfile | null,
   chat: ChatMapState | null,
-  settings: Pick<Settings, 'nearbyCount' | 'askReport'>,
+  settings: Pick<Settings, 'nearbyCount' | 'askReport'> & { describeTerrain?: boolean },
 ): string {
   if (!profile || !chat?.pos) return ''
   const { x, y } = chat.pos
@@ -260,6 +261,8 @@ export function buildContext(
     .filter(Boolean)
     .join(', ')
   lines.push(`Current position: ${formatCoord(x, y, 1)}${place ? ` (${place})` : ''}.`)
+
+  if (settings.describeTerrain !== false) lines.push(...describeSurroundings(profile, x, y))
 
   const near = nearest(profile, x, y, settings.nearbyCount)
   if (near.length) {

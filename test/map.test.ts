@@ -22,6 +22,7 @@ import {
   zoneRect,
 } from '../src/shared/geo'
 import { StampIndex, brushById, brushDab, eraseStamps } from '../src/ui/decor'
+import { describeSurroundings } from '../src/shared/surroundings'
 import { areasAt, featuresFromJson, featuresToGeoJson, pointInRings, simplify } from '../src/shared/features'
 import { entriesFromLorebookJson, parseMapEntries } from '../src/shared/mapext'
 import { mergeInto, newProfile, parseCoordinateText, parseSpans } from '../src/shared/parser'
@@ -634,6 +635,27 @@ describe('decorations', () => {
     ]
     expect(eraseStamps(list, 0, 0, 10).map((s) => s.r)).toEqual([3])
     expect(eraseStamps(list, 0, 0, 10, brushById('ink-trees')).map((s) => s.r)).toEqual([1, 3])
+  })
+})
+
+describe('surroundings', () => {
+  it('tells the model the biome underfoot, the nearest coast and notable landscape', () => {
+    const grid = newGrid({ minX: -100, maxX: 100, minY: -100, maxY: 100 }, 6000, 2)
+    const g = graphFor(grid)
+    const v = new Uint8Array(g.n).fill(OCEAN)
+    for (const c of cellsInRings(g, [[[-100, -100], [0, -100], [0, 100], [-100, 100]]])) v[c] = 6 // forest on the west half
+    const p = {
+      id: 'm', name: 'M', unitKm: 10, points: [], zones: [], updatedAt: 0,
+      bounds: { minX: -100, maxX: 100, minY: -100, maxY: 100 },
+      land: { ...grid, biome: encodeBytes(v) },
+      decor: [{ t: 'ink-volcano', x: -30, y: 10, s: 10, r: 1 }, { t: 'ink-peak', x: -40, y: -10, s: 6, r: 2 }],
+    } as any
+    const lines = describeSurroundings(p, -20, 0)
+    expect(lines[0]).toBe('Terrain: temperate deciduous forest.')
+    expect(lines[1]).toMatch(/^Coast: \d+ km E/)
+    expect(lines[2]).toMatch(/^Landscape: an active volcano [\d,]+ km [NSEW]+; mountains/)
+    expect(describeSurroundings(p, 15, 0)[0]).toBe('Terrain: at sea.')
+    expect(describeSurroundings(p, 15, 0)[1]).toMatch(/^Nearest land: \d+ km W/)
   })
 })
 

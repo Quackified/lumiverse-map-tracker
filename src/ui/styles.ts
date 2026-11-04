@@ -126,6 +126,18 @@ export const CSS = `
   background: var(--mt-elev); border: 1px solid var(--mt-border); box-shadow: 0 10px 28px rgba(0,0,0,0.4);
 }
 .mt-menu[hidden] { display: none; }
+.mt-card {
+  position: absolute; z-index: 19; width: min(300px, calc(100% - 16px)); max-height: calc(100% - 16px); overflow-y: auto; padding: 10px 12px;
+  display: grid; gap: 6px; border-radius: 10px; background: var(--mt-elev); border: 1px solid var(--mt-border); box-shadow: 0 12px 30px rgba(0,0,0,0.4); font-size: 12.5px;
+}
+.mt-card[hidden] { display: none; }
+.mt-card-head { display: flex; align-items: flex-start; gap: 8px; }
+.mt-card-title { flex: 1; min-width: 0; display: grid; line-height: 1.3; }
+.mt-card-title b { font-size: 14px; }
+.mt-card-title .mt-dim { font-size: 11.5px; }
+.mt-card-note { margin: 0; }
+.mt-card-lore { padding: 7px 9px; border-radius: 7px; background: var(--mt-fill-subtle); }
+.mt-card-lore p { margin: 4px 0 0; line-height: 1.45; }
 .mt-menu-head { padding: 5px 8px 4px; font-size: 11.5px; color: var(--mt-muted); font-family: var(--mt-mono); }
 .mt-menu-item { display: block; width: 100%; text-align: left; padding: 6px 8px; border: 0; border-radius: 5px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .mt-menu-item:hover:not(:disabled) { background: var(--mt-fill); }

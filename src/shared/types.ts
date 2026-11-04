@@ -182,6 +182,8 @@ export interface WorldProfile {
   decor?: DecorStamp[]
   /** Global variable the place coordinates are published to (e.g. "endwright_places"). Unset = off. */
   placesVar?: string
+  /** Lorebook whose entries show on place cards. */
+  placesBook?: string
   /** The raw coordinate text this profile was last imported from. */
   source?: string
   updatedAt: number
@@ -225,6 +227,8 @@ export interface Settings {
   askReport: boolean
   nearbyCount: number
   trailMax: number
+  /** Tell the model about the terrain and landscape around the position. */
+  describeTerrain: boolean
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -232,6 +236,7 @@ export const DEFAULT_SETTINGS: Settings = {
   injectMode: 'auto',
   askReport: true,
   nearbyCount: 3,
+  describeTerrain: true,
   trailMax: 200,
 }
 

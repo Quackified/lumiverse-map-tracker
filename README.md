@@ -16,9 +16,31 @@ Works with any world. You give it coordinate notes; it infers the points and zon
 
 1. Open the map from the chat input bar's Extras menu (**Map**) or the **Map** sidebar tab.
 2. Pick **+ New map…** in the map dropdown.
-3. **Import** tab: paste your coordinate notes (or load a lorebook entry), **Preview**, then **Apply**.
-4. **Image** tab (optional): upload a map picture, crop it, calibrate it.
-5. **Chat** tab: set your position and, if you like, a destination.
+3. **Import** (top bar): paste your coordinate notes (or load a lorebook entry), **Preview**, then **Apply**.
+4. **Picture** (optional): click the Picture layer, then upload a map picture, crop it, calibrate it.
+5. **Story** (top bar): set your position and, if you like, a destination.
+
+## The window
+
+The layout follows image editors such as Photoshop or Affinity:
+
+- **Top bar:** the map picker; **Story** (position, destination, what the model is told), **Import** (notes, lorebooks, map files, lorebook conversion), **Canvas** (canvas size) and **Map** (name, scale, new or delete map) open as panels over the map, and Esc closes them; undo and redo; zoom.
+- **Tool rail** (left), with a key for each tool:
+
+  | Tool | Key | | Tool | Key |
+  |---|---|---|---|---|
+  | Hand | H | | Select shapes | V |
+  | Measure | M | | Draw area | R |
+  | My position | P | | Draw line | L |
+  | Destination | D | | Place spot | S |
+  | Add place | A | | Biome brush | B |
+  | Move places | O | | Biome fill | G |
+  | Draw zone | Z | | Sample picture colour | I |
+
+  Clicking a tool always selects it; Esc returns to the hand.
+- **Options bar** (under the top bar): the active tool's settings, such as the brush's biome, size and Keep coastline, or the shape layer and type, and a one-line hint.
+- **Layers** (right): every drawn layer, top first, with visibility, lock and opacity: Places (with labels), Trail, Zones, Regions, the four Shapes layers, Land, Picture and Grid. Click a layer to edit it in Properties.
+- **Properties** (right, below Layers): the content behind the chosen layer or the active tool: the places list and editor, zones, the selected shape, the biome palette and seeding, or the picture's crop and calibration.
 
 ## Map fields in lorebook entries (preferred)
 
@@ -76,7 +98,7 @@ Markdown version of the same thing:
 ```
 
 - +X is east and +Y is north.
-- Zones under a heading or group whose name mentions a region (here "Western Continent …", or "Eastern Continent" for "Aldermere") are clipped to that region. For other zones, set **Clip to** in the Zones tab. Otherwise an open-ended zone like `Y>150` covers every continent.
+- Zones under a heading or group whose name mentions a region (here "Western Continent …", or "Eastern Continent" for "Aldermere") are clipped to that region. For other zones, set **Clip to** in Zones (Properties). Otherwise an open-ended zone like `Y>150` covers every continent.
 - When zones overlap, the higher **priority** wins, and ties go to the smaller zone. A zone whose note says it "overrides" another gets priority 1.
 
 ## Map image
@@ -85,19 +107,19 @@ Markdown version of the same thing:
 - **Placement:** the picture is a tracing reference, not the map. Click **Transform**, then drag inside it to move, a corner to scale (Shift keeps proportions) or an edge to squash or stretch one side. Centre, width and height can also be typed. **Fit to map bounds** starts it over your coordinates.
 - **Number fields:** Ctrl+drag changes the value by 1, Shift by 10, Ctrl+Shift by 100, Alt by 0.1 (Ctrl+Alt by 0.01). Whole steps snap to round numbers. The arrow keys use the same modifiers.
 - **Undo / Redo:** Ctrl+Z and Ctrl+Shift+Z (or the toolbar arrows) undo edits to points, zones, bounds, crop and pins. A drag or a scrub counts as one step.
-- **Export JSON / Import JSON** (Import tab) moves a map between installs. The file holds points, zones, crop and calibration but not the image. After importing, upload the image; if its size matches, the crop and calibration apply automatically.
+- **Export JSON / Import JSON** (Import) moves a map between installs. The file holds points, zones, crop and calibration but not the image. After importing, upload the image; if its size matches, the crop and calibration apply automatically.
 
 ## Moving places
 
 The lorebook gathers your places; the map owns where they are.
 
-- **Move places** (toolbar, or **Move** in the Points tab): drag a place to its spot. Positions snap to whole units; hold Shift for 10 or Alt for 0.1. The arrow keys nudge the selected place with the same modifiers. Every move can be undone.
-- A moved place remembers where the lorebook put it. While moving places, a hollow ring and a dashed line show that position. The Points tab counts moved places, can list only those, and reverts one (**Revert** in its editor, or right-click > **Back to lorebook position**) or all of them.
+- **Move places** (O, or **Move** in the Places properties): drag a place to its spot. Positions snap to whole units; hold Shift for 10 or Alt for 0.1. The arrow keys nudge the selected place with the same modifiers. Every move can be undone.
+- A moved place remembers where the lorebook put it. While moving places, a hollow ring and a dashed line show that position. The Places properties count moved places, can list only those, and reverts one (**Revert** in its editor, or right-click > **Back to lorebook position**) or all of them.
 - Re-importing from the lorebook refreshes names, groups and notes but keeps moved places where you put them. Their lorebook position updates to the new import.
 
 ### Lorebook variable
 
-Turn on **Lorebook variable** in the Points tab to publish every place's coordinates to one chat variable (default `<map name>_places`, e.g. `endwright_places`). It holds `{"shackle-city": "(-20, 60)", ...}`, is written into each chat that uses the map when the chat is opened, and updates whenever a place moves. A lorebook entry reads a place with:
+Turn on **Lorebook variable** in the Places properties to publish every place's coordinates to one chat variable (default `<map name>_places`, e.g. `endwright_places`). It holds `{"shackle-city": "(-20, 60)", ...}`, is written into each chat that uses the map when the chat is opened, and updates whenever a place moves. A lorebook entry reads a place with:
 
 ```
 Shackle City {{getchatvarkey::endwright_places::shackle-city}} sits on the trade road.
@@ -109,7 +131,7 @@ It is a chat variable rather than a global one because Lumiverse's prompt assemb
 
 ### Converting a lorebook
 
-Once places live on the map, the coordinates written into entries can point at it instead (Import tab > From a lorebook > pick the book > **Find coordinates**):
+Once places live on the map, the coordinates written into entries can point at it instead (Import > From a lorebook > pick the book > **Find coordinates**):
 
 - Every literal like `Shackle City (-20, 60)` or `Port:[20,-25]` is matched to a place: by a place named just before it (aliases in parentheses count), else by the entry's title when nothing else is named there, else by being the only place at those coordinates. Spans like `X[-45,0]` are left alone.
 - The preview shows each change in its line (old struck through, new below) with a checkbox. Name and title matches start ticked; position-only matches are marked "check it" and start unticked. A literal that matches no place can be added to the map as a new place.
@@ -118,20 +140,21 @@ Once places live on the map, the coordinates written into entries can point at i
 
 ## Land (cells and biomes)
 
-The **Land** tab turns the world into a few thousand small irregular cells, each with a biome, and draws them as the map: ocean with a soft shallow-water edge, biomes with smooth borders, a coastline, lakes, and terrain symbols (trees in forests, conifers in taiga, grass, dunes, reeds, peaks on mountains, mounds on hills).
+The **Land** layer turns the world into a few thousand small irregular cells, each with a biome, and draws them as the map: ocean with a soft shallow-water edge, biomes with smooth borders, a coastline, lakes, and terrain symbols (trees in forests, conifers in taiga, grass, dunes, reeds, peaks on mountains, mounds on hills).
 
-- **Create land grid** covers the map's bounds with a small margin. Detail sets the cell count (Coarse ~4,000 to Very fine ~40,000).
-- **Biomes:** Fantasy Map Generator's set (ocean, hot and cold desert, savanna, grassland, four forest types, taiga, tundra, glacier, wetland) plus lake, mountains and hills. Click a biome to paint with it; its swatch changes its colour (↺ restores the default).
-- **Brush** paints cells under the circle (size slider); **Fill** recolours a connected region. **Keep coastline** (off by default) stops a land biome from painting over water and water from painting over land. Alt+click with the brush picks the biome under the cursor. Space+drag pans. Every stroke can be undone.
-- **Seed from the map picture:** pick a biome, click **Pick colour**, and click the picture where it shows that biome (the picture comes to the front while picking). Add a sample for each look: the sea, each forest colour, sand, snow, rock. **Generate** gives every cell on the picture the biome of the nearest sample colour. **Tolerance** leaves colours unlike every sample (labels, ships, ink) to their neighbours; **Smoothing** clears speckle; **Min island** merges tiny islands and lakes. Crop the picture to the map itself first, or its frame becomes land; any leftovers are one Fill click away.
-- **Display:** opacity, terrain symbols on or off, and **Picture on top** to compare against the picture while painting.
+- Click the Land layer, then **Create land grid**. It covers the canvas. Detail sets the cell count (Coarse ~4,000 to Ultra ~80,000).
+- **Canvas size** (Canvas in the top bar) sets how far the world extends. With **Linked** on (the default), changing one edge sets the others to match: 1000 gives -1000 to 1000 on both axes. Turn it off to set each edge, or use **Fit to content**. On **Apply**, the land grid is rebuilt over the new canvas with the painting kept; new area starts as ocean, and land outside a smaller canvas is cut off. A grid that doesn't match the canvas offers **Resize grid to canvas**.
+- **Biomes:** Fantasy Map Generator's set (ocean, hot and cold desert, savanna, grassland, four forest types, taiga, tundra, glacier, wetland) plus lake, mountains and hills. Click a biome in Properties (or pick one in the options bar) to paint with it; its swatch changes its colour (↺ restores the default).
+- **Biome brush** (B) paints cells under the circle (size in the options bar); **Biome fill** (G) recolours a connected region. **Keep coastline** (options bar, off by default) stops a land biome from painting over water and water from painting over land. Alt+click with the brush picks the biome under the cursor. Space+drag pans. Every stroke can be undone.
+- **Seed from the map picture:** pick a biome, choose **Sample picture colour** (I, or **Pick colour**), and click the picture where it shows that biome (the picture comes to the front while picking). Add a sample for each look: the sea, each forest colour, sand, snow, rock. **Generate** gives every cell on the picture the biome of the nearest sample colour. **Tolerance** leaves colours unlike every sample (labels, ships, ink) to their neighbours; **Smoothing** clears speckle; **Min island** merges tiny islands and lakes. Crop the picture to the map itself first, or its frame becomes land; any leftovers are one Fill click away.
+- **Display:** terrain symbols on or off, and **Picture on top** to compare against the picture while painting. Opacity is on the Land layer row.
 - Hovering shows the biome under the cursor.
 
 Cells and biomes are adapted from [Azgaar's Fantasy Map Generator](https://github.com/Azgaar/Fantasy-Map-Generator) (MIT, © Max Haniyeu): the jittered lattice and Voronoi graph, the region outline tracing, and the default biome set and colours.
 
 ## Shapes (vector layers)
 
-Draw the world itself in world coordinates, so the map conforms to your data instead of to a picture. Open the **Shapes** tab.
+Draw the world itself in world coordinates, so the map conforms to your data instead of to a picture. Click a Shapes layer in Layers to draw on it, then use Select (V), Area (R), Line (L) or Spot (S); the options bar picks the layer and what to draw. Visibility, lock and opacity per layer are on the layer rows.
 
 | Layer | Holds |
 |---|---|

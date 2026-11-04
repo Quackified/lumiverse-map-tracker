@@ -25,26 +25,69 @@ import type {
 import { clear, debounce, enableScrub, h, hueOf, icon, numOrNull } from './dom'
 import { History } from './history'
 import { MapView, type Layers, type Tool } from './viewport'
+import { isVectorTool } from './vector'
 import { DENSITY_PRESETS, hasSymbols } from './terrain'
-import { BIOMES, DETAIL, DEFAULT_LAND, biomeColor, biomeName, biomesOf, cellsWithin, encodeBytes, findCell, floodCells, graphFor, isWater, newGrid } from '../shared/cells'
+import { BIOMES, DETAIL, MAX_CELLS, resampleGrid, DEFAULT_LAND, biomeColor, biomeName, biomesOf, cellsWithin, encodeBytes, findCell, floodCells, graphFor, isWater, newGrid } from '../shared/cells'
 import { colorAt, makeSampler, seedFromImage, type Sampler } from './landmap'
 import { isLandTool, type LandTool } from './viewport'
 import { worldToImage } from '../shared/geo'
 
-type Tab = 'chat' | 'points' | 'zones' | 'land' | 'layers' | 'import' | 'image' | 'map'
+type IconName = Parameters<typeof icon>[0]
 
-const TABS: [Tab, string][] = [
-  ['chat', 'Chat'],
-  ['points', 'Points'],
-  ['zones', 'Zones'],
-  ['land', 'Land'],
-  ['layers', 'Shapes'],
-  ['import', 'Import'],
-  ['image', 'Image'],
-  ['map', 'Map'],
+/** What the Properties panel shows: the content behind a layer, or the layer a tool works on. */
+type Panel = 'points' | 'zones' | 'land' | 'layers' | 'image'
+/** Occasional tasks, opened from the top bar over the map. */
+type Dialog = 'chat' | 'import' | 'map' | 'canvas'
+
+const PANEL_TITLE: Record<Panel, string> = { points: 'Places', zones: 'Zones & regions', land: 'Land', layers: 'Shapes', image: 'Picture' }
+const DIALOG_TITLE: Record<Dialog, string> = { chat: 'Story', import: 'Import', map: 'Map settings', canvas: 'Canvas size' }
+
+/** The tool rail, in groups, with single-key shortcuts. */
+const RAIL: { tool: Tool; icon: IconName; label: string; key: string }[][] = [
+  [
+    { tool: 'pan', icon: 'hand', label: 'Hand', key: 'h' },
+    { tool: 'measure', icon: 'ruler', label: 'Measure', key: 'm' },
+  ],
+  [
+    { tool: 'me', icon: 'me', label: 'My position', key: 'p' },
+    { tool: 'dest', icon: 'flag', label: 'Destination', key: 'd' },
+  ],
+  [
+    { tool: 'add', icon: 'pin', label: 'Add place', key: 'a' },
+    { tool: 'pmove', icon: 'movepin', label: 'Move places', key: 'o' },
+    { tool: 'zone', icon: 'zone', label: 'Draw zone', key: 'z' },
+  ],
+  [
+    { tool: 'vselect', icon: 'select', label: 'Select shapes', key: 'v' },
+    { tool: 'varea', icon: 'area', label: 'Draw area', key: 'r' },
+    { tool: 'vline', icon: 'line', label: 'Draw line', key: 'l' },
+    { tool: 'vspot', icon: 'spot', label: 'Place spot', key: 's' },
+  ],
+  [
+    { tool: 'lbrush', icon: 'brush', label: 'Biome brush', key: 'b' },
+    { tool: 'lfill', icon: 'bucket', label: 'Biome fill', key: 'g' },
+    { tool: 'lsample', icon: 'dropper', label: 'Sample picture colour', key: 'i' },
+  ],
 ]
 
+/** The panel each tool works on. */
+const TOOL_PANEL: Partial<Record<Tool, Panel>> = {
+  add: 'points',
+  pmove: 'points',
+  zone: 'zones',
+  vselect: 'layers',
+  varea: 'layers',
+  vline: 'layers',
+  vspot: 'layers',
+  lbrush: 'land',
+  lfill: 'land',
+  lsample: 'land',
+  crop: 'image',
+  imgxf: 'image',
+}
+
 const TOOL_HINT: Partial<Record<Tool, string>> = {
+  pan: 'Drag to pan, wheel to zoom. Right-click the map for more.',
   me: 'Click the map to set your position (snaps to points).',
   dest: 'Click the map to set the destination (snaps to points).',
   add: 'Click the map to add a point.',
@@ -52,13 +95,13 @@ const TOOL_HINT: Partial<Record<Tool, string>> = {
   crop: 'Drag the corners or edges to crop; drag inside to move the box. Esc when done.',
   zone: 'Drag a rectangle to create a zone.',
   imgxf: 'Drag inside the picture to move it; corners scale (Shift keeps proportions), edges stretch. Esc when done.',
-  vselect: 'Click a shape to select; drag to move; handles scale and stretch. Space+drag pans.',
-  varea: 'Click to add points or drag freehand; Enter or double-click finishes. Space+drag pans.',
-  vline: 'Click to add points or drag freehand; Enter or double-click finishes. Space+drag pans.',
+  vselect: 'Click a shape (Shift adds); drag to move; handles scale. Drag a vertex, double-click an edge to add one, Delete removes. Space+drag pans.',
+  varea: 'Click to add points or drag freehand; Enter or double-click finishes; Backspace undoes a point; Esc cancels.',
+  vline: 'Click to add points or drag freehand; Enter or double-click finishes; Backspace undoes a point; Esc cancels.',
   vspot: 'Click to place.',
   lbrush: 'Drag to paint the selected biome. Alt+click picks the biome under the cursor. Space+drag pans; Esc stops painting.',
   lfill: 'Click a region to fill it with the selected biome. Esc stops.',
-  lsample: 'Click the map picture where it shows the selected biome to add a colour sample.',
+  lsample: 'Click the picture where it shows the selected biome to add a colour sample, then Generate.',
   pmove: 'Drag places to move them (Shift 10, Alt 0.1); arrows nudge. Rings mark lorebook positions.',
 }
 
@@ -78,9 +121,10 @@ interface ConvRow {
 const UI_KEY = 'map_tracker.ui'
 
 interface UiPrefs {
-  tab: Tab
+  panel: Panel
   side: boolean
   layers: Layers
+  layersOpen: boolean
 }
 
 function loadUi(): Partial<UiPrefs> {
@@ -89,6 +133,11 @@ function loadUi(): Partial<UiPrefs> {
   } catch {
     return {}
   }
+}
+
+function fmtBounds(b: Bounds): string {
+  const r = (n: number) => String(Math.round(n * 100) / 100)
+  return `X ${r(b.minX)} … ${r(b.maxX)}, Y ${r(b.minY)} … ${r(b.maxY)}`
 }
 
 function round2(n: number): number {
@@ -111,18 +160,25 @@ export class MapApp {
   private state: StatePayload | null = null
   private profile: WorldProfile | null = null
   private imageKey = ''
-  private tab: Tab
+  private panel: Panel
+  private dialog: Dialog | null = null
+  private layersOpen: boolean
   private sideOpen: boolean
   private side: HTMLDivElement
   private sideBody: HTMLDivElement
-  private tabBar: HTMLDivElement
+  private rail: HTMLDivElement
+  private optbar: HTMLDivElement
+  private layersBox: HTMLDivElement
+  private propsTitle: HTMLDivElement
+  private dialogEl: HTMLDivElement
+  private dialogTitle: HTMLSpanElement
+  private dialogBody: HTMLDivElement
   private status: HTMLDivElement
   private toolbar: HTMLDivElement
   private profileSelect: HTMLSelectElement
   private toolButtons = new Map<Tool, HTMLButtonElement>()
   private hint: HTMLDivElement
   private menu: HTMLDivElement
-  private layersPop: HTMLDivElement
   private sideDirty = false
   private editingPoi: string | null = null
   private editingZone: string | null = null
@@ -168,7 +224,8 @@ export class MapApp {
     private send: (msg: FrontendMessage) => void,
   ) {
     const prefs = loadUi()
-    this.tab = prefs.tab ?? 'chat'
+    this.panel = prefs.panel ?? 'points'
+    this.layersOpen = prefs.layersOpen ?? true
     this.sideOpen = prefs.side ?? true
 
     const rulerX = h('canvas', { class: 'mt-ruler-x' })
@@ -196,20 +253,56 @@ export class MapApp {
     this.hint.hidden = true
     this.menu = h('div', { class: 'mt-menu' })
     this.menu.hidden = true
-    this.layersPop = this.buildLayers()
     this.map.el.append(this.hint, this.menu)
 
     this.profileSelect = h('select', { class: 'mt-select mt-profile', title: 'Map', onchange: () => this.onProfileChange() })
     this.toolbar = this.buildToolbar()
+    this.optbar = h('div', { class: 'mt-optbar' })
+    this.rail = this.buildRail()
 
-    this.tabBar = h('div', { class: 'mt-tabs' })
+    // Dock: Layers on top, Properties (what's behind the chosen layer or tool) below.
+    this.layersBox = h('div', { class: 'mt-lrows' })
+    this.propsTitle = h('div', { class: 'mt-panel-title' })
     this.sideBody = h('div', { class: 'mt-side-body' })
-    this.side = h('div', { class: 'mt-side' }, this.tabBar, this.sideBody)
-    this.side.addEventListener('focusout', () => {
-      setTimeout(() => {
-        if (this.sideDirty && !this.side.contains(document.activeElement)) this.renderSide()
-      }, 0)
-    })
+    this.side = h(
+      'div',
+      { class: 'mt-side' },
+      h(
+        'div',
+        { class: 'mt-panel mt-panel-layers' },
+        h(
+          'button',
+          {
+            class: 'mt-panel-head mt-panel-toggle',
+            title: 'Show or hide the layer list',
+            onclick: () => {
+              this.layersOpen = !this.layersOpen
+              this.savePrefs()
+              this.renderLayersPanel()
+            },
+          },
+          icon('chevron'),
+          h('span', { class: 'mt-panel-title' }, 'Layers'),
+        ),
+        this.layersBox,
+      ),
+      h('div', { class: 'mt-panel mt-panel-props' }, h('div', { class: 'mt-panel-head' }, this.propsTitle), this.sideBody),
+    )
+    this.dialogTitle = h('span', { class: 'mt-panel-title' })
+    this.dialogBody = h('div', { class: 'mt-side-body' })
+    this.dialogEl = h(
+      'div',
+      { class: 'mt-dialog' },
+      h('div', { class: 'mt-panel-head' }, this.dialogTitle, h('span', { class: 'mt-spacer' }), h('button', { class: 'mt-btn mt-icon-btn', title: 'Close (Esc)', onclick: () => this.closeDialog() }, icon('close'))),
+      this.dialogBody,
+    )
+    this.dialogEl.hidden = true
+    for (const host of [this.side, this.dialogEl])
+      host.addEventListener('focusout', () => {
+        setTimeout(() => {
+          if (this.sideDirty && !this.editingField()) this.renderSide()
+        }, 0)
+      })
 
     this.status = h('div', { class: 'mt-status' })
     const grid = h(
@@ -220,9 +313,9 @@ export class MapApp {
       rulerY,
       this.map.el,
       this.side,
-      this.layersPop,
+      this.dialogEl,
     )
-    this.el = h('div', { class: 'mt-app' }, this.toolbar, grid, this.status)
+    this.el = h('div', { class: 'mt-app', tabindex: '-1' }, this.toolbar, this.optbar, h('div', { class: 'mt-main' }, this.rail, grid), this.status)
     this.el.dataset.side = String(this.sideOpen)
 
     // Narrow (snapped to a third, docked in the sidebar): the side panel becomes an
@@ -240,6 +333,14 @@ export class MapApp {
     this.ro.observe(this.el)
 
     document.addEventListener('pointerdown', this.onDocPointer, true)
+    // Lumiverse drags a floating widget from any press it doesn't see handled, and then
+    // takes the pointer from the map (strokes stop after one dab). Mark presses as ours.
+    this.el.addEventListener('pointerdown', (e) => {
+      if ((e.target as HTMLElement).closest('input, textarea, select, option, [contenteditable]')) return
+      e.preventDefault()
+      // A handled press doesn't move focus; keep it in the window for Esc and tool keys.
+      if (!this.el.contains(document.activeElement)) this.el.focus({ preventScroll: true })
+    })
     this.el.addEventListener('keydown', (e) => this.onKey(e))
     enableScrub(this.el, {
       onStart: () => (this.editGroup = `scrub-${Date.now()}`),
@@ -252,12 +353,24 @@ export class MapApp {
   }
 
   private onKey(e: KeyboardEvent): void {
-    const mod = e.ctrlKey || e.metaKey
-    if (!mod) return
     const t = e.target as HTMLElement
-    // Text fields keep their own undo.
+    // Text fields keep their own keys and undo.
     if (t.matches('textarea, input:not([type=checkbox]):not([type=radio]):not([type=range]), select')) return
+    const mod = e.ctrlKey || e.metaKey
     const k = e.key.toLowerCase()
+    if (!mod) {
+      if (e.altKey || e.repeat) return
+      if (k === 'escape' && this.dialog) {
+        this.closeDialog()
+        return
+      }
+      const hit = !e.shiftKey && RAIL.flat().find((r) => r.key === k)
+      if (!hit) return
+      this.pickTool(hit.tool)
+      e.preventDefault()
+      e.stopPropagation()
+      return
+    }
     if (k === 'z' && !e.shiftKey) this.undo()
     else if ((k === 'z' && e.shiftKey) || k === 'y') this.redo()
     else return
@@ -311,12 +424,11 @@ export class MapApp {
   private onDocPointer = (e: PointerEvent) => {
     const t = e.target as Node
     if (!this.menu.hidden && !this.menu.contains(t)) this.menu.hidden = true
-    if (!this.layersPop.hidden && !this.layersPop.contains(t) && !(t as HTMLElement).closest?.('.mt-layers-btn')) this.layersPop.hidden = true
   }
 
   private savePrefs(): void {
     try {
-      localStorage.setItem(UI_KEY, JSON.stringify({ tab: this.tab, side: this.sideOpen, layers: this.map.layers }))
+      localStorage.setItem(UI_KEY, JSON.stringify({ panel: this.panel, side: this.sideOpen, layers: this.map.layers, layersOpen: this.layersOpen }))
     } catch {
       /* ignore */
     }
@@ -353,7 +465,7 @@ export class MapApp {
             if (msg.profileId !== this.profile?.id) return
             this.picture = img
             this.map.setImage(img)
-            if (this.tab === 'land') this.renderSide(true)
+            if (this.panel === 'land') this.renderSide(true)
           }
           img.src = msg.dataUrl
         }
@@ -371,7 +483,7 @@ export class MapApp {
         break
       case 'lorebookBackups':
         this.backups = msg.backups
-        if (this.tab === 'import') this.renderSide(true)
+        if (this.dialog === 'import') this.renderSide(true)
         break
       case 'lorebookApplied':
         this.convert = null
@@ -418,36 +530,22 @@ export class MapApp {
   private buildToolbar(): HTMLDivElement {
     this.undoBtn = h('button', { class: 'mt-btn', title: 'Undo (Ctrl+Z)', disabled: true, onclick: () => this.undo() }, icon('undo'))
     this.redoBtn = h('button', { class: 'mt-btn', title: 'Redo (Ctrl+Shift+Z)', disabled: true, onclick: () => this.redo() }, icon('redo'))
-    const toolBtn = (t: Tool, ico: Parameters<typeof icon>[0], title: string) => {
-      const b = h('button', { class: 'mt-btn mt-tool', title, onclick: () => this.setTool(t) }, icon(ico))
-      this.toolButtons.set(t, b)
-      return b
-    }
+    const menuBtn = (d: Dialog, ico: IconName, label: string, title: string) =>
+      h('button', { class: 'mt-btn mt-menu-btn', title, dataset: { dialog: d }, onclick: () => (this.dialog === d ? this.closeDialog() : this.openDialog(d)) }, icon(ico), h('span', { class: 'mt-btn-label' }, label))
     return h(
       'div',
       { class: 'mt-toolbar' },
       this.profileSelect,
       h(
         'div',
-        { class: 'mt-seg' },
-        toolBtn('pan', 'pan', 'Pan / select (drag to move, wheel to zoom)'),
-        toolBtn('me', 'me', 'Set my position'),
-        toolBtn('dest', 'flag', 'Set destination'),
-        toolBtn('add', 'pin', 'Add point'),
-        toolBtn('pmove', 'movepin', 'Move places'),
-        toolBtn('measure', 'ruler', 'Measure distance'),
-      ),
-      h(
-        'div',
-        { class: 'mt-seg', title: 'Shapes (Layers tab)' },
-        toolBtn('vselect', 'select', 'Select shapes'),
-        toolBtn('varea', 'area', 'Draw an area'),
-        toolBtn('vline', 'line', 'Draw a line'),
-        toolBtn('vspot', 'spot', 'Place a spot'),
+        { class: 'mt-seg mt-menus' },
+        menuBtn('chat', 'chat', 'Story', 'Position, destination and what the model is told'),
+        menuBtn('import', 'import', 'Import', 'Coordinate notes, lorebooks, map files and lorebook conversion'),
+        menuBtn('canvas', 'canvas', 'Canvas', 'Canvas size: how far the world extends'),
+        menuBtn('map', 'gear', 'Map', 'Name, scale, new or delete map'),
       ),
       h('div', { class: 'mt-seg' }, this.undoBtn, this.redoBtn),
       h('div', { class: 'mt-spacer' }),
-      h('button', { class: 'mt-btn mt-layers-btn', title: 'Layers', onclick: () => (this.layersPop.hidden = !this.layersPop.hidden) }, icon('layers')),
       h(
         'div',
         { class: 'mt-seg' },
@@ -456,61 +554,55 @@ export class MapApp {
         h('button', { class: 'mt-btn', title: 'Zoom in (+)', onclick: () => this.map.zoomBy(1.25) }, icon('plus')),
       ),
       h('button', { class: 'mt-btn', title: 'Center on me', onclick: () => this.centerOnMe() }, icon('me')),
-      h('button', { class: 'mt-btn mt-side-btn', title: 'Toggle side panel', onclick: () => this.toggleSide() }, icon('side')),
+      h('button', { class: 'mt-btn mt-side-btn', title: 'Show or hide the Layers and Properties panels', onclick: () => this.toggleSide() }, icon('side')),
     )
   }
 
-  private buildLayers(): HTMLDivElement {
-    const names: [keyof Layers, string][] = [
-      ['image', 'Map image'],
-      ['grid', 'Grid'],
-      ['regions', 'Regions'],
-      ['zones', 'Zones'],
-      ['points', 'Points'],
-      ['labels', 'Labels'],
-      ['trail', 'Trail'],
-    ]
-    const el = h(
-      'div',
-      { class: 'mt-pop mt-layers' },
-      ...names.map(([k, label]) => {
-        const cb = h('input', {
-          type: 'checkbox',
-          onchange: (e: Event) => {
-            this.map.layers = { ...this.map.layers, [k]: (e.target as HTMLInputElement).checked }
-            this.map.invalidate()
-            this.savePrefs()
-          },
-        })
-        cb.dataset.layer = k
-        return h('label', { class: 'mt-check' }, cb, label)
-      }),
-    )
-    el.hidden = true
-    return el
+  private buildRail(): HTMLDivElement {
+    const rail = h('div', { class: 'mt-rail' })
+    RAIL.forEach((group, i) => {
+      if (i) rail.append(h('div', { class: 'mt-rail-sep' }))
+      for (const r of group) {
+        const b = h('button', { class: 'mt-btn mt-rail-btn', title: `${r.label} (${r.key.toUpperCase()})`, onclick: () => this.pickTool(r.tool) }, icon(r.icon))
+        this.toolButtons.set(r.tool, b)
+        rail.append(b)
+      }
+    })
+    return rail
+  }
+
+  /** A tool chosen on the rail or by its key. Land tools need a grid, the sampler a picture. */
+  private pickTool(t: Tool): void {
+    if (t !== 'pan' && t !== 'measure' && !this.profile) return this.warn('Pick or create a map first.')
+    if (isLandTool(t) && !this.profile?.land) {
+      this.openPanel('land')
+      return this.warn('Create a land grid first (Land, in Properties).')
+    }
+    if (t === 'lsample' && !this.profile?.image) return this.warn('Upload a map picture first (Picture layer).')
+    this.setTool(t)
   }
 
   private setTool(t: Tool): void {
-    const prev = this.map.tool
     this.map.setTool(t)
     for (const [tool, b] of this.toolButtons) b.classList.toggle('mt-on', tool === t)
-    const hint = TOOL_HINT[t]
-    this.hint.hidden = !hint
-    this.hint.textContent = hint ?? ''
-    const panelTools: Tool[] = ['crop', 'zone', 'imgxf', 'vselect', 'varea', 'vline', 'vspot', 'pmove', 'lbrush', 'lfill', 'lsample']
-    if (isLandTool(t) && this.tab !== 'land' && this.profile) {
-      this.tab = 'land'
+    this.hint.hidden = true
+    const panel = TOOL_PANEL[t]
+    if (panel && this.profile) {
+      this.panel = panel
       if (!this.isSideShown()) this.toggleSide()
     }
-    if (['varea', 'vline', 'vspot'].includes(t) && this.tab !== 'layers' && this.profile) {
-      this.tab = 'layers'
-      if (!this.isSideShown()) this.toggleSide()
+    const geom: FeatureGeom | null = t === 'varea' ? 'area' : t === 'vline' ? 'line' : t === 'vspot' ? 'spot' : null
+    if (geom) {
+      // Draw on a layer that has this kind of shape, with a type of that shape.
+      const vec = this.map.vec
+      if (!FEATURE_TYPES[vec.drawLayer].some((x) => x.geom === geom)) vec.drawLayer = LAYER_ORDER.find((l) => FEATURE_TYPES[l].some((x) => x.geom === geom)) ?? vec.drawLayer
+      const types = FEATURE_TYPES[vec.drawLayer]
+      if (!types.some((x) => x.type === vec.drawType && x.geom === geom)) vec.drawType = (types.find((x) => x.geom === geom) ?? types[0]).type
+      this.drawGeom = geom
     }
-    if (t === 'varea') this.drawGeom = 'area'
-    if (t === 'vline') this.drawGeom = 'line'
-    if (t === 'vspot') this.drawGeom = 'spot'
     if (t !== 'varea') this.map.vec.holeFor = null
-    if (panelTools.includes(t) || panelTools.includes(prev)) this.renderSide()
+    this.renderOptions()
+    this.renderSide()
   }
 
   private isSideShown(): boolean {
@@ -526,11 +618,32 @@ export class MapApp {
     }
   }
 
-  private openTab(tab: Tab): void {
-    this.tab = tab
+  private openPanel(panel: Panel): void {
+    this.panel = panel
     if (!this.isSideShown()) this.toggleSide()
     this.savePrefs()
     this.renderSide(true)
+  }
+
+  private openDialog(d: Dialog): void {
+    if (d === 'canvas') {
+      this.canvasDraft = null
+      this.canvasCells = null
+    }
+    this.dialog = d
+    this.renderSide(true)
+  }
+
+  private closeDialog(): void {
+    this.dialog = null
+    this.renderSide(true)
+    this.map.el.focus({ preventScroll: true })
+  }
+
+  /** A text field in the dock or dialog has focus: re-rendering would eat the typing. */
+  private editingField(): boolean {
+    const a = document.activeElement as HTMLElement | null
+    return !!a && (this.side.contains(a) || this.dialogEl.contains(a)) && a.matches('input, textarea, select')
   }
 
   private centerOnMe(): void {
@@ -542,7 +655,7 @@ export class MapApp {
     const v = this.profileSelect.value
     if (v === '__new') {
       this.send({ type: 'createProfile', name: 'New map' })
-      this.tab = 'import'
+      this.dialog = 'import'
       return
     }
     if (v) this.send({ type: 'selectProfile', profileId: v })
@@ -571,7 +684,7 @@ export class MapApp {
       this.mutate((p) => p.points.push({ id, name: 'New point', x: n, y: m, group: 'Added' }), false)
       this.editingPoi = id
       this.setTool('pan')
-      this.openTab('points')
+      this.openPanel('points')
     }
   }
 
@@ -593,14 +706,14 @@ export class MapApp {
       )
       this.editingZone = id
       this.setTool('pan')
-      this.openTab('zones')
+      this.openPanel('zones')
     }
   }
 
   private onSelectPoi(poi: Poi | null): void {
     if (!poi) return
     this.editingPoi = poi.id
-    if (this.tab === 'points') this.renderSide(true)
+    if (this.panel === 'points') this.renderSide(true)
   }
 
   private onPoiMove(id: string, x: number, y: number, phase: 'move' | 'end'): void {
@@ -641,7 +754,7 @@ export class MapApp {
       poi
         ? item(`Edit ${poi.name}`, () => {
             this.editingPoi = poi.id
-            this.openTab('points')
+            this.openPanel('points')
           })
         : item('Add point here', () => this.onPick('add', x, y), !this.profile),
       item('Copy coordinates', () => void navigator.clipboard?.writeText(formatCoord(tx, ty, poi ? 0 : 1))),
@@ -649,18 +762,19 @@ export class MapApp {
       ...(poi?.origin ? [item(`Back to lorebook position ${placeText(poi.origin.x, poi.origin.y)}`, () => this.revertPoi([poi.id]))] : []),
     )
     const r = this.map.el.getBoundingClientRect()
+    const k = r.width > 0 && this.map.el.clientWidth > 0 ? this.map.el.clientWidth / r.width : 1
     this.menu.hidden = false
     const mw = this.menu.offsetWidth
     const mh = this.menu.offsetHeight
-    this.menu.style.left = `${Math.min(clientX - r.left, r.width - mw - 4)}px`
-    this.menu.style.top = `${Math.min(clientY - r.top, r.height - mh - 4)}px`
+    this.menu.style.left = `${Math.min((clientX - r.left) * k, this.map.el.clientWidth - mw - 4)}px`
+    this.menu.style.top = `${Math.min((clientY - r.top) * k, this.map.el.clientHeight - mh - 4)}px`
   }
 
   private warn(message: string): void {
     this.hint.hidden = false
     this.hint.textContent = message
     setTimeout(() => {
-      if (this.hint.textContent === message) this.hint.hidden = !TOOL_HINT[this.map.tool]
+      if (this.hint.textContent === message) this.hint.hidden = true
     }, 2500)
   }
 
@@ -668,6 +782,7 @@ export class MapApp {
 
   private render(): void {
     this.renderToolbar()
+    this.renderOptions()
     this.renderStatus()
     this.renderSide()
   }
@@ -680,9 +795,6 @@ export class MapApp {
     this.profileSelect.append(h('option', { value: '__new' }, '+ New map…'))
     this.profileSelect.value = this.profile?.id ?? ''
     for (const [tool, b] of this.toolButtons) b.classList.toggle('mt-on', tool === this.map.tool)
-    for (const cb of this.layersPop.querySelectorAll<HTMLInputElement>('input[data-layer]')) {
-      cb.checked = this.map.layers[cb.dataset.layer as keyof Layers]
-    }
   }
 
   private renderStatus(): void {
@@ -710,54 +822,230 @@ export class MapApp {
     const label = mode === 'auto' ? 'Injecting' : mode === 'macro' ? 'Macro only' : 'Not sent'
     this.status.append(
       h('span', { class: 'mt-spacer' }),
-      h('button', { class: `mt-chip mt-chip-${mode}`, title: 'How the position reaches the model', onclick: () => this.openTab('chat') }, label),
+      h('button', { class: `mt-chip mt-chip-${mode}`, title: 'How the position reaches the model', onclick: () => this.openDialog('chat') }, label),
     )
   }
 
   private renderSide(force = false): void {
-    if (!force && this.side.contains(document.activeElement) && (document.activeElement as HTMLElement).matches('input, textarea, select')) {
+    if (!force && this.editingField()) {
       this.sideDirty = true
       return
     }
     this.sideDirty = false
-    clear(this.tabBar)
-    for (const [id, label] of TABS) {
-      this.tabBar.append(h('button', { class: `mt-tab${id === this.tab ? ' mt-on' : ''}`, onclick: () => this.openTab(id) }, label))
-    }
-    const scroll = this.sideBody.scrollTop
-    clear(this.sideBody)
+    const a = document.activeElement
+    const hadFocus = !!a && (this.side.contains(a) || this.dialogEl.contains(a))
+    this.renderLayersPanel()
+    this.renderProps()
+    this.renderDialog()
+    // The focused button was rebuilt: keep focus in the window so Esc and tool keys still work.
+    if (hadFocus && !this.el.contains(document.activeElement)) this.el.focus({ preventScroll: true })
+  }
+
+  private renderProps(): void {
+    this.propsTitle.textContent = this.panel === 'layers' ? `Shapes · ${LAYER_LABEL[this.map.vec.drawLayer]}` : PANEL_TITLE[this.panel]
     const body = this.sideBody
-    if (!this.profile && this.tab !== 'import' && this.tab !== 'chat') {
+    const scroll = body.scrollTop
+    clear(body)
+    if (!this.profile) {
       body.append(this.emptyMapNotice())
       return
     }
-    switch (this.tab) {
-      case 'chat':
-        this.renderChatTab(body)
-        break
-      case 'points':
-        this.renderPointsTab(body)
-        break
-      case 'zones':
-        this.renderZonesTab(body)
-        break
-      case 'import':
-        this.renderImportTab(body)
-        break
-      case 'image':
-        this.renderImageTab(body)
-        break
-      case 'map':
-        this.renderMapTab(body)
-        break
-      case 'layers':
-        this.renderLayersTab(body)
-        break
-      case 'land':
-        this.renderLandTab(body)
-        break
-    }
+    if (this.panel === 'points') this.renderPointsTab(body)
+    else if (this.panel === 'zones') this.renderZonesTab(body)
+    else if (this.panel === 'image') this.renderImageTab(body)
+    else if (this.panel === 'layers') this.renderLayersTab(body)
+    else this.renderLandTab(body)
     body.scrollTop = scroll
+  }
+
+  private renderDialog(): void {
+    const d = this.dialog
+    for (const b of this.toolbar.querySelectorAll<HTMLButtonElement>('[data-dialog]')) b.classList.toggle('mt-on', b.dataset.dialog === d)
+    this.dialogEl.hidden = !d
+    if (!d) return
+    this.dialogTitle.textContent = DIALOG_TITLE[d]
+    const body = this.dialogBody
+    const scroll = body.scrollTop
+    clear(body)
+    if (d === 'chat') this.renderChatTab(body)
+    else if (d === 'import') this.renderImportTab(body)
+    else if (this.profile && d === 'canvas') this.renderCanvasTab(body)
+    else if (this.profile) this.renderMapTab(body)
+    else body.append(this.emptyMapNotice())
+    body.scrollTop = scroll
+  }
+
+  /** Every drawn layer, top first: visibility, lock and opacity; a click opens what's behind it. */
+  private renderLayersPanel(): void {
+    const box = this.layersBox
+    box.parentElement?.classList.toggle('mt-collapsed', !this.layersOpen)
+    clear(box)
+    const p = this.profile
+    if (!p || !this.layersOpen) return
+    const L = this.map.layers
+    const stamp = Date.now()
+    const flip = (k: keyof Layers) => {
+      this.map.layers = { ...this.map.layers, [k]: !this.map.layers[k] }
+      this.map.invalidate()
+      this.savePrefs()
+      this.renderLayersPanel()
+    }
+    const setVec = (layer: FeatureLayer, patch: Partial<LayerSettings>, group: string | null = null) => {
+      this.mutate((d) => {
+        d.layerSettings = { ...(d.layerSettings ?? {}), [layer]: { ...layerSettings(d.layerSettings, layer), ...patch } }
+      }, false, group)
+      if (!group) this.renderLayersPanel()
+    }
+    const range = (value: number, onInput: (v: number) => void) => {
+      const r = h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(value), class: 'mt-lrow-opacity', title: 'Opacity' })
+      r.addEventListener('input', () => onInput(Number(r.value)))
+      return r
+    }
+    const row = (o: { label: string; visible: boolean; onEye: () => void; on?: boolean; open?: () => void; count?: string | number; extra?: HTMLElement[]; indent?: boolean }) =>
+      h(
+        'div',
+        {
+          class: `mt-lrow${o.on ? ' mt-on' : ''}${o.indent ? ' mt-indent' : ''}${o.visible ? '' : ' mt-off'}${o.open ? ' mt-pick' : ''}`,
+          title: o.open ? 'Click to edit in Properties' : undefined,
+          onclick: (e: Event) => !(e.target as HTMLElement).closest('button, input') && o.open?.(),
+        },
+        h('button', { class: 'mt-btn mt-icon-btn', title: o.visible ? 'Hide' : 'Show', onclick: o.onEye }, icon(o.visible ? 'eye' : 'eyeOff')),
+        h('span', { class: 'mt-lrow-name' }, o.label),
+        o.count !== undefined ? h('span', { class: 'mt-dim mt-mono' }, String(o.count)) : '',
+        ...(o.extra ?? []),
+      )
+    const fs = p.features ?? []
+    const vecOn = this.panel === 'layers' ? this.map.vec.drawLayer : null
+    box.append(
+      row({
+        label: 'Places',
+        visible: L.points,
+        onEye: () => flip('points'),
+        on: this.panel === 'points',
+        open: () => this.openPanel('points'),
+        count: p.points.length,
+        extra: [h('button', { class: `mt-btn mt-icon-btn${L.labels ? ' mt-on' : ''}`, title: L.labels ? 'Hide labels' : 'Show labels', onclick: () => flip('labels') }, icon('labels'))],
+      }),
+      row({ label: 'Trail', visible: L.trail, onEye: () => flip('trail') }),
+      row({ label: 'Zones', visible: L.zones, onEye: () => flip('zones'), on: this.panel === 'zones', open: () => this.openPanel('zones'), count: p.zones.filter((z) => z.kind !== 'region').length }),
+      row({ label: 'Regions', visible: L.regions, onEye: () => flip('regions'), on: this.panel === 'zones', open: () => this.openPanel('zones'), count: p.zones.filter((z) => z.kind === 'region').length }),
+      h('button', { class: `mt-lgroup${this.panel === 'layers' ? ' mt-on' : ''}`, onclick: () => this.openPanel('layers') }, 'Shapes'),
+      ...LAYER_ORDER.slice()
+        .reverse()
+        .map((layer) => {
+          const st = layerSettings(p.layerSettings, layer)
+          return row({
+            label: LAYER_LABEL[layer],
+            indent: true,
+            visible: st.visible,
+            onEye: () => setVec(layer, { visible: !st.visible }),
+            on: vecOn === layer,
+            open: () => this.selectVecLayer(layer),
+            count: fs.filter((f) => f.layer === layer).length,
+            extra: [
+              h('button', { class: `mt-btn mt-icon-btn${st.locked ? ' mt-on' : ''}`, title: st.locked ? 'Unlock layer' : 'Lock layer', onclick: () => setVec(layer, { locked: !st.locked }) }, icon(st.locked ? 'lock' : 'unlock')),
+              range(st.opacity, (v) => setVec(layer, { opacity: v }, `opacity-${layer}-${stamp}`)),
+            ],
+          })
+        }),
+      row({
+        label: 'Land',
+        visible: L.land,
+        onEye: () => flip('land'),
+        on: this.panel === 'land',
+        open: () => this.openPanel('land'),
+        count: p.land ? undefined : 'none',
+        extra: p.land
+          ? [
+              range(this.map.landOpacity, (v) => {
+                this.map.landOpacity = v
+                this.map.invalidate()
+              }),
+            ]
+          : [],
+      }),
+      row({
+        label: 'Picture',
+        visible: L.image,
+        onEye: () => flip('image'),
+        on: this.panel === 'image',
+        open: () => this.openPanel('image'),
+        count: p.image ? undefined : 'none',
+        extra: p.image ? [range(p.image.opacity, (v) => this.mutate((d) => d.image && (d.image.opacity = v), false, `opacity-image-${stamp}`))] : [],
+      }),
+      row({ label: 'Grid', visible: L.grid, onEye: () => flip('grid') }),
+    )
+  }
+
+  /** Choose a shapes layer to draw on and edit. */
+  private selectVecLayer(layer: FeatureLayer): void {
+    this.panel = 'layers'
+    if (!this.isSideShown()) this.toggleSide()
+    this.setDrawLayer(layer)
+    this.renderOptions()
+  }
+
+  /** The options bar: what the active tool is and its settings. */
+  private renderOptions(): void {
+    const bar = this.optbar
+    clear(bar)
+    const t = this.map.tool
+    const r = RAIL.flat().find((x) => x.tool === t)
+    const name = r?.label ?? (t === 'crop' ? 'Crop picture' : t === 'imgxf' ? 'Transform picture' : t)
+    bar.append(h('span', { class: 'mt-opt-tool' }, r ? icon(r.icon) : '', name))
+    const p = this.profile
+    if (p && isVectorTool(t)) bar.append(...this.shapeOptions(t))
+    if (p?.land && isLandTool(t)) bar.append(...this.landOptions(t))
+    const hint = TOOL_HINT[t]
+    if (hint) bar.append(h('span', { class: 'mt-opt-hint', title: hint }, hint))
+  }
+
+  private shapeOptions(t: Tool): HTMLElement[] {
+    const vec = this.map.vec
+    const layerSel = h('select', { class: 'mt-select', title: 'Layer to draw on and select from' })
+    for (const l of LAYER_ORDER) layerSel.append(h('option', { value: l, selected: l === vec.drawLayer }, LAYER_LABEL[l]))
+    layerSel.addEventListener('change', () => this.selectVecLayer(layerSel.value as FeatureLayer))
+    const out: HTMLElement[] = [h('label', { class: 'mt-opt' }, h('span', { class: 'mt-dim' }, 'Layer'), layerSel)]
+    if (t !== 'vselect') {
+      const types = FEATURE_TYPES[vec.drawLayer].filter((x) => x.geom === this.drawGeom)
+      const typeSel = h('select', { class: 'mt-select', title: 'What to draw' })
+      for (const x of types) typeSel.append(h('option', { value: x.type, selected: x.type === vec.drawType }, x.label))
+      typeSel.addEventListener('change', () => (vec.drawType = typeSel.value))
+      out.push(h('label', { class: 'mt-opt' }, h('span', { class: 'mt-dim' }, 'Type'), typeSel))
+    }
+    return out
+  }
+
+  private landOptions(t: Tool): HTMLElement[] {
+    const grid = this.profile!.land!
+    const swatch = h('span', { class: 'mt-swatch' })
+    swatch.style.background = biomeColor(this.landBiome, grid)
+    const sel = h('select', { class: 'mt-select', title: 'Biome to paint (Alt+click on the map picks one)' })
+    for (const b of BIOMES) sel.append(h('option', { value: String(b.id), selected: b.id === this.landBiome }, biomeName(b.id, grid)))
+    sel.addEventListener('change', () => {
+      this.landBiome = Number(sel.value)
+      swatch.style.background = biomeColor(this.landBiome, grid)
+      if (this.panel === 'land') this.renderSide(true)
+    })
+    const out: HTMLElement[] = [h('label', { class: 'mt-opt' }, swatch, sel)]
+    if (t === 'lbrush') {
+      const size = h('input', { type: 'range', min: '4', max: '120', value: String(this.map.brushPx), class: 'mt-opt-range', title: 'Brush size' })
+      size.addEventListener('input', () => {
+        this.map.brushPx = Number(size.value)
+        this.map.invalidate()
+      })
+      out.push(h('label', { class: 'mt-opt' }, h('span', { class: 'mt-dim' }, 'Size'), size))
+    }
+    if (t === 'lbrush' || t === 'lfill') {
+      const keep = h('input', { type: 'checkbox', checked: this.landKeepCoast })
+      keep.addEventListener('change', () => (this.landKeepCoast = keep.checked))
+      out.push(h('label', { class: 'mt-opt mt-check', title: 'Land biomes only paint over land, water only over water' }, keep, 'Keep coastline'))
+    }
+    if (t === 'lsample') {
+      const n = grid.samples?.length ?? 0
+      out.push(h('span', { class: 'mt-dim' }, `${n} sample${n === 1 ? '' : 's'}`), h('button', { class: 'mt-btn mt-primary', disabled: !n, onclick: () => this.seedLand() }, 'Generate'))
+    }
+    return out
   }
 
   private emptyMapNotice(): HTMLElement {
@@ -1566,7 +1854,7 @@ export class MapApp {
       if (lore && hasMapData(lore)) {
         this.importText = ''
         this.importPreview = parseMapEntries(lore)
-        this.tab = 'import'
+        this.dialog = 'import'
         this.renderSide(true)
         return
       }
@@ -1724,10 +2012,7 @@ export class MapApp {
             {
               class: 'mt-btn mt-primary',
               onclick: () => {
-                const b = p.bounds
-                const mx = (b.maxX - b.minX) * 0.06
-                const my = (b.maxY - b.minY) * 0.06
-                const bounds = { minX: Math.floor(b.minX - mx), maxX: Math.ceil(b.maxX + mx), minY: Math.floor(b.minY - my), maxY: Math.ceil(b.maxY + my) }
+                const bounds = { ...p.bounds }
                 this.mutate((d) => {
                   d.land = newGrid(bounds, this.landDetail)
                 })
@@ -1737,7 +2022,7 @@ export class MapApp {
             'Create land grid',
           ),
         ),
-        h('div', { class: 'mt-dim' }, 'It covers the map’s bounds with a small margin.'),
+        h('div', { class: 'mt-row mt-wrap' }, h('span', { class: 'mt-dim' }, `It covers the canvas, ${fmtBounds(p.bounds)}.`), h('button', { class: 'mt-link', onclick: () => this.openDialog('canvas') }, 'Canvas size…')),
       )
       return
     }
@@ -1746,21 +2031,26 @@ export class MapApp {
     const biomes = biomesOf(grid, graph)
     const counts = new Map<number, number>()
     for (let i = 0; i < biomes.length; i++) counts.set(biomes[i], (counts.get(biomes[i]) ?? 0) + 1)
-    const tool = this.map.tool
-    const toolBtn = (t: LandTool, label: string, title: string) =>
-      h('button', { class: `mt-btn${tool === t ? ' mt-on' : ''}`, title, onclick: () => this.setTool(t) }, label)
-    const size = h('input', { type: 'range', min: '4', max: '120', value: String(this.map.brushPx), class: 'mt-grow' })
-    size.addEventListener('input', () => {
-      this.map.brushPx = Number(size.value)
-      this.map.invalidate()
-    })
-    const keep = h('input', { type: 'checkbox', checked: this.landKeepCoast })
-    keep.addEventListener('change', () => (this.landKeepCoast = keep.checked))
-    body.append(
-      h('h4', null, 'Paint'),
-      h('div', { class: 'mt-row mt-wrap' }, toolBtn('lbrush', 'Brush', 'Paint cells'), toolBtn('lfill', 'Fill', 'Fill a connected region'), h('label', { class: 'mt-check', title: 'Painting a land biome only changes land, and water only changes water' }, keep, 'Keep coastline')),
-      h('div', { class: 'mt-row' }, h('span', { class: 'mt-dim' }, 'Brush'), size),
-    )
+    const gb = grid.bounds
+    const cb = p.bounds
+    if (gb.minX !== cb.minX || gb.maxX !== cb.maxX || gb.minY !== cb.minY || gb.maxY !== cb.maxY) {
+      // Grids made before Canvas size (or with a margin) don't match the canvas: offer to follow it.
+      const same = Math.min(MAX_CELLS, Math.round((grid.cells * (cb.maxX - cb.minX) * (cb.maxY - cb.minY)) / ((gb.maxX - gb.minX) * (gb.maxY - gb.minY))))
+      body.append(
+        h(
+          'div',
+          { class: 'mt-editor' },
+          h('div', null, `The land grid covers ${fmtBounds(gb)}, but the canvas is ${fmtBounds(cb)}. Painting only works inside the grid.`),
+          h(
+            'div',
+            { class: 'mt-row mt-wrap' },
+            h('button', { class: 'mt-btn mt-primary', onclick: () => this.mutate((d) => d.land && (d.land = resampleGrid(d.land, { ...d.bounds }, same))) }, 'Resize grid to canvas'),
+            h('span', { class: 'mt-dim' }, `${same.toLocaleString()} cells, painting kept`),
+          ),
+        ),
+      )
+    }
+    body.append(h('div', { class: 'mt-dim' }, 'Pick a biome, then paint with the Brush (B) or Fill (G) on the left. Alt+click on the map picks the biome under the cursor.'))
 
     // Palette: pick the biome to paint; the swatch changes its colour.
     const pal = h('div', { class: 'mt-list' })
@@ -1784,7 +2074,10 @@ export class MapApp {
               onclick: () => {
                 this.landBiome = b.id
                 if (!isLandTool(this.map.tool)) this.setTool('lbrush')
-                else this.renderSide(true)
+                else {
+                  this.renderSide(true)
+                  this.renderOptions()
+                }
               },
             },
             biomeName(b.id, grid),
@@ -1811,12 +2104,7 @@ export class MapApp {
     }
     body.append(h('h4', null, 'Biomes'), pal)
 
-    // Display.
-    const opacity = h('input', { type: 'range', min: '0.1', max: '1', step: '0.05', value: String(this.map.landOpacity), class: 'mt-grow' })
-    opacity.addEventListener('input', () => {
-      this.map.landOpacity = Number(opacity.value)
-      this.map.invalidate()
-    })
+    // Display (opacity is on the Land layer row).
     const onTop = h('input', { type: 'checkbox', checked: this.map.imageOnTop, disabled: !p.image })
     onTop.addEventListener('change', () => {
       this.map.imageOnTop = onTop.checked
@@ -1830,7 +2118,6 @@ export class MapApp {
     )
     body.append(
       h('h4', null, 'Display'),
-      h('div', { class: 'mt-row' }, h('span', { class: 'mt-dim' }, 'Opacity'), opacity),
       h('div', { class: 'mt-row mt-wrap' }, h('label', { class: 'mt-check' }, symbols, 'Terrain symbols'), h('label', { class: 'mt-check', title: 'Show the map picture above the land, at its own opacity' }, onTop, 'Picture on top')),
     )
 
@@ -2000,6 +2287,7 @@ export class MapApp {
       if (b !== null) {
         this.landBiome = b
         this.renderSide(true)
+        this.renderOptions()
       }
       this.landStroke = null
       return
@@ -2060,73 +2348,11 @@ export class MapApp {
     const vec = this.map.vec
     const active = vec.drawLayer
 
-    const setLayer = (layer: FeatureLayer, patch: Partial<LayerSettings>, group?: string) =>
-      this.mutate((d) => {
-        d.layerSettings = { ...(d.layerSettings ?? {}), [layer]: { ...layerSettings(d.layerSettings, layer), ...patch } }
-      }, !group, group ?? null)
-
-    const rows = LAYER_ORDER.slice()
-      .reverse()
-      .map((layer) => {
-        const st = layerSettings(p.layerSettings, layer)
-        const count = fs.filter((f) => f.layer === layer).length
-        const opacity = h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(st.opacity), class: 'mt-layer-opacity', title: 'Opacity' })
-        opacity.addEventListener('input', () => setLayer(layer, { opacity: Number(opacity.value) }, `opacity-${layer}`))
-        return h(
-          'div',
-          { class: `mt-layer${layer === active ? ' mt-on' : ''}`, onclick: (e: Event) => !(e.target as HTMLElement).closest('button, input') && this.setDrawLayer(layer) },
-          h('button', { class: `mt-btn mt-icon-btn${st.visible ? '' : ' mt-off'}`, title: st.visible ? 'Hide layer' : 'Show layer', onclick: () => setLayer(layer, { visible: !st.visible }) }, icon(st.visible ? 'eye' : 'eyeOff')),
-          h('button', { class: `mt-btn mt-icon-btn${st.locked ? ' mt-on' : ''}`, title: st.locked ? 'Unlock layer' : 'Lock layer', onclick: () => setLayer(layer, { locked: !st.locked }) }, icon(st.locked ? 'lock' : 'unlock')),
-          h('span', { class: 'mt-layer-name' }, LAYER_LABEL[layer]),
-          h('span', { class: 'mt-dim' }, String(count)),
-          opacity,
-        )
-      })
-    body.append(h('h4', null, 'Layers'), h('div', { class: 'mt-layers-list' }, ...rows))
-
-    // Drawing: pick a type, then the tool for its shape.
-    const types = FEATURE_TYPES[active]
-    const typeSel = h('select', { class: 'mt-select mt-grow', title: 'What to draw' })
-    types.forEach((t, i) => typeSel.append(h('option', { value: String(i) }, `${t.label} (${t.geom})`)))
-    const cur = types.findIndex((t) => t.type === vec.drawType && t.geom === this.drawGeom)
-    typeSel.value = String(Math.max(0, cur))
-    typeSel.addEventListener('change', () => {
-      const t = types[Number(typeSel.value)]
-      vec.drawType = t.type
-      this.drawGeom = t.geom
-      this.setTool(t.geom === 'area' ? 'varea' : t.geom === 'line' ? 'vline' : 'vspot')
-    })
-    const tool = this.map.tool
-    const drawBtn = (t: Tool, ico: Parameters<typeof icon>[0], label: string, geom?: FeatureGeom) =>
-      h(
-        'button',
-        {
-          class: `mt-btn${tool === t ? ' mt-on mt-primary' : ''}`,
-          disabled: !!geom && !types.some((x) => x.geom === geom),
-          onclick: () => {
-            if (geom && !types.some((x) => x.type === vec.drawType && x.geom === geom)) {
-              const first = types.find((x) => x.geom === geom)!
-              vec.drawType = first.type
-            }
-            if (geom) this.drawGeom = geom
-            this.setTool(t)
-          },
-        },
-        icon(ico),
-        label,
-      )
     body.append(
-      h('h4', null, `Draw on ${LAYER_LABEL[active]}`),
-      h('div', { class: 'mt-row' }, typeSel),
-      h('div', { class: 'mt-row mt-wrap' }, drawBtn('vselect', 'select', 'Select'), drawBtn('varea', 'area', 'Area', 'area'), drawBtn('vline', 'line', 'Line', 'line'), drawBtn('vspot', 'spot', 'Spot', 'spot')),
       h(
         'div',
         { class: 'mt-dim' },
-        tool === 'varea' || tool === 'vline'
-          ? 'Click to add points, or drag to draw freehand. Enter or double-click finishes; Backspace removes the last point; Esc cancels. Hold Space to pan.'
-          : tool === 'vselect'
-            ? 'Click a shape to select it (Shift adds). Drag to move; handles scale (Shift keeps proportions, Alt from the centre). Drag a vertex to move it, double-click an edge to add one, Alt+click or Delete removes one.'
-            : 'Pick what to draw, then Area, Line or Spot.',
+        `Drawing on ${LAYER_LABEL[active]}. Select (V), Area (R), Line (L) and Spot (S) are on the left; the options bar picks the layer and what to draw. Choose another layer in the Layers panel.`,
       ),
     )
 
@@ -2169,6 +2395,10 @@ export class MapApp {
   }
 
   private drawGeom: FeatureGeom = 'area'
+  /** Canvas size being edited (applied on Apply), with the edges linked or not. */
+  private canvasDraft: Bounds | null = null
+  private canvasLinked = true
+  private canvasCells: number | null = null
 
   private setDrawLayer(layer: FeatureLayer): void {
     const vec = this.map.vec
@@ -2282,7 +2512,7 @@ export class MapApp {
   }
 
   private onFeatureSelection(_ids: string[]): void {
-    if (this.tab === 'layers') this.renderSide(true)
+    if (this.panel === 'layers') this.renderSide(true)
   }
 
   private async importLayers(): Promise<void> {
@@ -2337,6 +2567,143 @@ export class MapApp {
     this.send({ type: 'setImage', profileId: p.id, dataUrl, width: img.naturalWidth, height: img.naturalHeight, mime: f.mimeType })
   }
 
+  /** Canvas size: how far the world extends. The land grid follows, keeping its painting. */
+  private renderCanvasTab(body: HTMLElement): void {
+    const p = this.profile!
+    const d = (this.canvasDraft ??= { ...p.bounds })
+    const keys: [keyof Bounds, string][] = [
+      ['minX', 'Left (X min)'],
+      ['maxX', 'Right (X max)'],
+      ['minY', 'Bottom (Y min)'],
+      ['maxY', 'Top (Y max)'],
+    ]
+    const inputs = new Map<keyof Bounds, HTMLInputElement>()
+    const size = h('div', { class: 'mt-dim' })
+    const landInfo = h('div', { class: 'mt-dim' })
+    const apply = h('button', { class: 'mt-btn mt-primary' }, 'Apply')
+    const detail = h('select', { class: 'mt-select' })
+    const grid = p.land
+    const area = (b: Bounds) => Math.max(1e-9, (b.maxX - b.minX) * (b.maxY - b.minY))
+    const refresh = () => {
+      for (const [k, el] of inputs) if (document.activeElement !== el) el.value = String(round2(d[k]))
+      const w = d.maxX - d.minX
+      const hh = d.maxY - d.minY
+      const ok = w > 0 && hh > 0
+      size.textContent = ok ? `${round2(w)} \u00d7 ${round2(hh)} units \u00b7 ${formatKm(w * p.unitKm)} \u00d7 ${formatKm(hh * p.unitKm)}` : 'Right must be greater than left, and top greater than bottom.'
+      apply.disabled = !ok
+      if (grid && ok) {
+        // Same cell size as now, if that stays under the cap; otherwise the finest allowed.
+        const same = Math.round((grid.cells * area(d)) / area(grid.bounds))
+        const opts: [number, string][] = [
+          [Math.min(same, MAX_CELLS), same > MAX_CELLS ? `Finest allowed (${MAX_CELLS.toLocaleString()} cells)` : `Same cell size (~${same.toLocaleString()} cells)`],
+          ...DETAIL.filter(([n]) => n !== Math.min(same, MAX_CELLS)).map(([n, l]) => [n, `${l} (~${n.toLocaleString()} cells)`] as [number, string]),
+        ]
+        const pick = this.canvasCells ?? opts[0][0]
+        clear(detail)
+        for (const [n, l] of opts) detail.append(h('option', { value: String(n), selected: n === pick }, l))
+        if (!opts.some(([n]) => n === pick)) detail.value = String(opts[0][0])
+        const cell = Math.sqrt(area(d) / Number(detail.value))
+        const cut = d.minX > grid.bounds.minX || d.maxX < grid.bounds.maxX || d.minY > grid.bounds.minY || d.maxY < grid.bounds.maxY
+        landInfo.textContent = `Cells about ${round2(cell)} units across. New area starts as ocean${cut ? '; land outside the new canvas is cut off' : ''}.`
+      }
+    }
+    const set = (k: keyof Bounds, v: number) => {
+      if (this.canvasLinked) {
+        const m = Math.abs(v)
+        d.minX = -m
+        d.maxX = m
+        d.minY = -m
+        d.maxY = m
+      } else d[k] = v
+      refresh()
+    }
+    const fields: HTMLElement[] = []
+    for (const [k, label] of keys) {
+      const el = h('input', { class: 'mt-input', type: 'number', step: 'any', value: String(round2(d[k])) })
+      el.addEventListener('input', () => {
+        const v = numOrNull(el.value)
+        if (v !== null) set(k, v)
+      })
+      el.addEventListener('change', () => refresh())
+      inputs.set(k, el)
+      fields.push(h('label', null, label), el)
+    }
+    detail.addEventListener('change', () => {
+      this.canvasCells = Number(detail.value)
+      refresh()
+    })
+    apply.addEventListener('click', () => {
+      const bounds = { ...d }
+      const cells = grid ? Number(detail.value) : 0
+      this.mutate((q) => {
+        q.bounds = bounds
+        if (q.land) q.land = resampleGrid(q.land, bounds, cells)
+      })
+      this.canvasDraft = null
+      this.dialog = null
+      this.renderSide(true)
+      this.map.fit()
+      this.warn(`Canvas is now ${fmtBounds(bounds)}.`)
+    })
+    const link = h(
+      'button',
+      {
+        class: `mt-btn${this.canvasLinked ? ' mt-on' : ''}`,
+        title: this.canvasLinked ? 'Linked: every edge mirrors the one you change (1000 gives -1000 to 1000 both ways)' : 'Edges change independently',
+        onclick: () => {
+          this.canvasLinked = !this.canvasLinked
+          if (this.canvasLinked) set('maxX', Math.max(Math.abs(d.minX), Math.abs(d.maxX), Math.abs(d.minY), Math.abs(d.maxY)))
+          this.renderSide(true)
+        },
+      },
+      icon(this.canvasLinked ? 'link' : 'unlink'),
+      this.canvasLinked ? 'Linked' : 'Unlinked',
+    )
+    body.append(
+      h('div', { class: 'mt-dim' }, 'How far the world extends, in map units. Points, zones and shapes keep their coordinates; the picture keeps its calibration.'),
+      h('div', { class: 'mt-row' }, link, h('span', { class: 'mt-dim' }, this.canvasLinked ? 'Square around 0: change one edge, the rest follow' : 'Each edge on its own')),
+      h('div', { class: 'mt-form' }, ...fields),
+      size,
+      h(
+        'div',
+        { class: 'mt-row mt-wrap' },
+        h(
+          'button',
+          {
+            class: 'mt-btn mt-ghost',
+            title: 'Just big enough for every point, zone and shape',
+            onclick: () => {
+              Object.assign(d, boundsOf(p))
+              this.canvasLinked = false
+              this.renderSide(true)
+            },
+          },
+          'Fit to content',
+        ),
+        h(
+          'button',
+          {
+            class: 'mt-btn mt-ghost',
+            onclick: () => {
+              Object.assign(d, p.bounds)
+              this.renderSide(true)
+            },
+          },
+          'Reset',
+        ),
+      ),
+    )
+    if (grid)
+      body.append(
+        h('h4', null, 'Land grid'),
+        h('div', { class: 'mt-dim' }, `Now ${grid.cells.toLocaleString()} cells over ${fmtBounds(grid.bounds)}. It is rebuilt over the new canvas with your painting kept.`),
+        h('div', { class: 'mt-form' }, h('label', null, 'Detail'), detail),
+        landInfo,
+      )
+    body.append(h('div', { class: 'mt-row' }, apply, h('button', { class: 'mt-btn', onclick: () => this.closeDialog() }, 'Cancel')))
+    refresh()
+  }
+
   private renderMapTab(body: HTMLElement): void {
     const p = this.profile!
     const s = this.state
@@ -2347,20 +2714,11 @@ export class MapApp {
       const v = numOrNull(unit.value)
       if (v && v > 0) this.mutate((d) => (d.unitKm = v))
     })
-    const b = (k: keyof Bounds) => {
-      const el = h('input', { class: 'mt-input', type: 'number', step: 'any', value: String(Math.round(p.bounds[k] * 100) / 100) })
-      el.addEventListener('change', () => {
-        const v = numOrNull(el.value)
-        if (v !== null) this.mutate((d) => (d.bounds = { ...d.bounds, [k]: v }))
-      })
-      return el
-    }
     const isDefault = s?.settings.defaultProfileId === p.id
     body.append(
       h('div', { class: 'mt-form' }, h('label', null, 'Name'), name, h('label', null, '1 unit ='), h('div', { class: 'mt-row' }, unit, h('span', null, 'km'))),
-      h('h4', null, 'Bounds'),
-      h('div', { class: 'mt-form mt-form-4' }, h('label', null, 'X min'), b('minX'), h('label', null, 'X max'), b('maxX'), h('label', null, 'Y min'), b('minY'), h('label', null, 'Y max'), b('maxY')),
-      h('div', { class: 'mt-row' }, h('button', { class: 'mt-btn mt-ghost', onclick: () => this.mutate((d) => (d.bounds = boundsOf(d))) }, 'Auto from points & zones')),
+      h('h4', null, 'Canvas'),
+      h('div', { class: 'mt-row mt-wrap' }, h('span', { class: 'mt-mono' }, fmtBounds(p.bounds)), h('button', { class: 'mt-btn', onclick: () => this.openDialog('canvas') }, icon('canvas'), 'Canvas size…')),
       h(
         'label',
         { class: 'mt-check' },

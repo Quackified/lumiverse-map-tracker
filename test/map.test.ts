@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import manifest from '../spindle.json'
 import { movePoint, placeRef, placesVarName, placesVarValue, revertPoint } from '../src/shared/places'
 import { applyRefs, findCoords, guessName, resolveRefs } from '../src/shared/convert'
-import { DEFAULT_LAND, LAKE, OCEAN, biomesOf, buildGraph, dropSmallRegions, encodeBytes, findCell, floodCells, graphFor, isWater, regionRings, smoothCells } from '../src/shared/cells'
+import { DEFAULT_LAND, LAKE, OCEAN, biomesOf, buildGraph, dropSmallRegions, encodeBytes, findCell, floodCells, graphFor, isWater, newGrid, regionRings, resampleGrid, smoothCells } from '../src/shared/cells'
 import {
   bearing,
   buildContext,
@@ -565,5 +565,20 @@ describe('land grid', () => {
     v[findCell(g, 100, 50)] = DEFAULT_LAND
     expect(dropSmallRegions(g, v, 3).some((b) => b !== OCEAN)).toBe(false)
     expect(smoothCells(g, v, 1).some((b) => b !== OCEAN)).toBe(false)
+  })
+
+  it('resizes the canvas keeping the painting, with new area as ocean', () => {
+    const grid = newGrid({ minX: -100, maxX: 100, minY: -100, maxY: 100 }, 6000, 7)
+    const g = graphFor(grid)
+    const v = new Uint8Array(g.n)
+    for (const c of floodCells(g, v, findCell(g, 0, 0)).filter((c) => Math.hypot(g.points[2 * c], g.points[2 * c + 1]) < 30)) v[c] = DEFAULT_LAND
+    const painted = { ...grid, biome: encodeBytes(v) }
+    const big = resampleGrid(painted, { minX: -1000, maxX: 1000, minY: -1000, maxY: 1000 }, 20000)
+    expect(big.bounds.maxX).toBe(1000)
+    const g2 = graphFor(big)
+    const b2 = biomesOf(big, g2)
+    expect(b2[findCell(g2, 0, 0)]).toBe(DEFAULT_LAND)
+    expect(b2[findCell(g2, 500, 500)]).toBe(OCEAN)
+    expect(b2[findCell(g2, 0, 80)]).toBe(OCEAN)
   })
 })

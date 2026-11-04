@@ -58,7 +58,11 @@ export const DETAIL: [number, string][] = [
   [10000, 'Normal'],
   [20000, 'Fine'],
   [40000, 'Very fine'],
+  [80000, 'Ultra'],
 ]
+
+/** Most cells a grid may have (drawing and seeding slow down past this). */
+export const MAX_CELLS = 80000
 
 // ── Geometry ────────────────────────────────────────────────────────────────
 
@@ -342,6 +346,25 @@ export function biomesOf(grid: LandGrid, g: Graph): Uint8Array {
 export function newGrid(bounds: Bounds, cells: number, seed = Math.floor(Math.random() * 2 ** 31)): LandGrid {
   const g = buildGraph(bounds, cells, seed)
   return { v: 1, bounds, cells, seed, biome: encodeBytes(new Uint8Array(g.n)) }
+}
+
+/**
+ * The same painting over new bounds: a fresh grid where each cell takes the
+ * biome under it in the old grid, and anything outside the old bounds is ocean.
+ */
+export function resampleGrid(old: LandGrid, bounds: Bounds, cells: number): LandGrid {
+  const g0 = graphFor(old)
+  const b0 = biomesOf(old, g0)
+  const next = newGrid(bounds, Math.max(1000, Math.min(MAX_CELLS, Math.round(cells))))
+  const g1 = graphFor(next)
+  const out = new Uint8Array(g1.n)
+  const ob = old.bounds
+  for (let i = 0; i < g1.n; i++) {
+    const x = g1.points[2 * i]
+    const y = g1.points[2 * i + 1]
+    out[i] = x >= ob.minX && x <= ob.maxX && y >= ob.minY && y <= ob.maxY ? b0[findCell(g0, x, y)] : OCEAN
+  }
+  return { ...old, bounds: { ...bounds }, cells: next.cells, seed: next.seed, biome: encodeBytes(out) }
 }
 
 // ── Clean-up ────────────────────────────────────────────────────────────────

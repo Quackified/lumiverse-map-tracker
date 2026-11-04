@@ -449,6 +449,7 @@ export class MapView {
   // ── Interaction ───────────────────────────────────────────────────────────
 
   private local(e: { clientX: number; clientY: number }): { x: number; y: number } {
+    // Rendered pixels, like the canvas size taken in resize(), so the host's UI zoom cancels out.
     const r = this.el.getBoundingClientRect()
     return { x: e.clientX - r.left, y: e.clientY - r.top }
   }

@@ -167,6 +167,8 @@ export class MapWindow {
       this.snapTo(this.slot === 'max' ? null : 'max')
     })
     this.frame.addEventListener('pointerdown', (e) => {
+      // Keep the host's widget drag out of our presses (see MapApp).
+      if (!(e.target as HTMLElement).closest('input, textarea, select, option, [contenteditable]')) e.preventDefault()
       if (!this.picker.hidden && !(e.target as HTMLElement).closest('.mt-picker, .mt-win-btn')) this.picker.hidden = true
     })
     window.addEventListener('resize', this.onResize)

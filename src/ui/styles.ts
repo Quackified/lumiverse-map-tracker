@@ -120,7 +120,7 @@ export const CSS = `
 .mt-side { grid-column: 3; grid-row: 1 / 3; display: flex; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--mt-border); background: var(--mt-elev); }
 .mt-narrow .mt-grid { grid-template-columns: 40px minmax(0, 1fr) 0; }
 .mt-narrow .mt-side { grid-column: auto; grid-row: auto; position: absolute; right: 0; top: 0; bottom: 0; width: min(320px, 88%); z-index: 15; box-shadow: -12px 0 30px rgba(0,0,0,0.35); }
-.mt-tabs { display: flex; flex: none; overflow-x: auto; border-bottom: 1px solid var(--mt-border); scrollbar-width: none; }
+.mt-tabs { display: flex; flex: none; flex-wrap: wrap; border-bottom: 1px solid var(--mt-border); }
 .mt-tab { flex: none; padding: 8px 10px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--mt-muted); font: inherit; font-size: 12px; cursor: pointer; }
 .mt-tab:hover { color: var(--mt-text); }
 .mt-tab.mt-on { color: var(--mt-text); border-bottom-color: var(--mt-primary); }

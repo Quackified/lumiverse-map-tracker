@@ -56,8 +56,8 @@ const TOOL_HINT: Partial<Record<Tool, string>> = {
   varea: 'Click to add points or drag freehand; Enter or double-click finishes. Space+drag pans.',
   vline: 'Click to add points or drag freehand; Enter or double-click finishes. Space+drag pans.',
   vspot: 'Click to place.',
-  lbrush: 'Drag to paint the selected biome. Alt+click picks the biome under the cursor. Space+drag pans.',
-  lfill: 'Click a region to fill it with the selected biome.',
+  lbrush: 'Drag to paint the selected biome. Alt+click picks the biome under the cursor. Space+drag pans; Esc stops painting.',
+  lfill: 'Click a region to fill it with the selected biome. Esc stops.',
   lsample: 'Click the map picture where it shows the selected biome to add a colour sample.',
   pmove: 'Drag places to move them (Shift 10, Alt 0.1); arrows nudge. Rings mark lorebook positions.',
 }
@@ -419,7 +419,7 @@ export class MapApp {
     this.undoBtn = h('button', { class: 'mt-btn', title: 'Undo (Ctrl+Z)', disabled: true, onclick: () => this.undo() }, icon('undo'))
     this.redoBtn = h('button', { class: 'mt-btn', title: 'Redo (Ctrl+Shift+Z)', disabled: true, onclick: () => this.redo() }, icon('redo'))
     const toolBtn = (t: Tool, ico: Parameters<typeof icon>[0], title: string) => {
-      const b = h('button', { class: 'mt-btn mt-tool', title, onclick: () => this.setTool(this.map.tool === t ? 'pan' : t) }, icon(ico))
+      const b = h('button', { class: 'mt-btn mt-tool', title, onclick: () => this.setTool(t) }, icon(ico))
       this.toolButtons.set(t, b)
       return b
     }
@@ -1748,7 +1748,7 @@ export class MapApp {
     for (let i = 0; i < biomes.length; i++) counts.set(biomes[i], (counts.get(biomes[i]) ?? 0) + 1)
     const tool = this.map.tool
     const toolBtn = (t: LandTool, label: string, title: string) =>
-      h('button', { class: `mt-btn${tool === t ? ' mt-on' : ''}`, title, onclick: () => this.setTool(tool === t ? 'pan' : t) }, label)
+      h('button', { class: `mt-btn${tool === t ? ' mt-on' : ''}`, title, onclick: () => this.setTool(t) }, label)
     const size = h('input', { type: 'range', min: '4', max: '120', value: String(this.map.brushPx), class: 'mt-grow' })
     size.addEventListener('input', () => {
       this.map.brushPx = Number(size.value)
@@ -2109,7 +2109,7 @@ export class MapApp {
               vec.drawType = first.type
             }
             if (geom) this.drawGeom = geom
-            this.setTool(tool === t ? 'pan' : t)
+            this.setTool(t)
           },
         },
         icon(ico),

@@ -173,6 +173,12 @@ export const CSS = `
   background: var(--mt-elev); border: 1px solid var(--mt-border); border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,0.45);
 }
 .mt-dialog[hidden] { display: none; }
+.mt-brushes { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 6px; }
+.mt-brush { display: grid; justify-items: center; gap: 2px; padding: 4px 2px 5px; border: 1px solid var(--mt-border); border-radius: 8px; background: var(--mt-fill-subtle); color: inherit; font: inherit; font-size: 11px; line-height: 1.2; cursor: pointer; text-align: center; }
+.mt-brush img { width: 72px; height: 48px; object-fit: contain; }
+.mt-brush:hover { background: var(--mt-fill); }
+.mt-brush.mt-on { border-color: var(--mt-primary); box-shadow: inset 0 0 0 1px var(--mt-primary); }
+.mt-brush-thumb { width: 42px; height: 28px; object-fit: contain; border-radius: 4px; background: rgba(160, 190, 110, 0.35); }
 .mt-canvas-size { display: grid; grid-template-columns: 54px minmax(0, 1fr) 30px; grid-template-rows: auto auto; gap: 6px 6px; align-items: center; margin: 10px 0 6px; }
 .mt-canvas-size > label { color: var(--mt-muted); font-size: 11.5px; }
 .mt-canvas-size .mt-link-btn { grid-column: 3; grid-row: 1 / 3; height: 100%; width: 28px; }

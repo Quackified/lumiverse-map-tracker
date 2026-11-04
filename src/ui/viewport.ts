@@ -16,6 +16,7 @@ import type { Bounds, Calibration, ChatMapState, Feature, MapImageMeta, Poi, Rec
 import { clear, h, hueOf } from './dom'
 import { VectorEditor, isVectorTool, type VectorTool } from './vector'
 import { LandRenderer } from './landmap'
+import { DecorRenderer } from './decor'
 import { biomeName } from '../shared/cells'
 
 export type LandTool = 'lbrush' | 'lfill' | 'llasso' | 'lpick' | 'lsample' | 'lwand' | 'lcoast'
@@ -23,7 +24,9 @@ const LAND_TOOLS = new Set<string>(['lbrush', 'lfill', 'llasso', 'lpick', 'lsamp
 export const isLandTool = (t: string): t is LandTool => LAND_TOOLS.has(t)
 /** Tools that read the picture: it comes to the front while they're active. */
 const PICTURE_TOOLS = new Set<string>(['lsample', 'lwand', 'lcoast'])
-export type Tool = 'pan' | 'me' | 'dest' | 'add' | 'measure' | 'crop' | 'zone' | 'imgxf' | 'pmove' | VectorTool | LandTool
+export type DecorTool = 'dbrush' | 'derase'
+export const isDecorTool = (t: string): t is DecorTool => t === 'dbrush' || t === 'derase'
+export type Tool = 'pan' | 'me' | 'dest' | 'add' | 'measure' | 'crop' | 'zone' | 'imgxf' | 'pmove' | VectorTool | LandTool | DecorTool
 type CropMode = 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
 
 const CROP_CURSOR: Record<CropMode, string> = {
@@ -47,10 +50,12 @@ export interface Layers {
   labels: boolean
   trail: boolean
   land: boolean
+  decor: boolean
 }
 
 export const DEFAULT_LAYERS: Layers = {
   land: true,
+  decor: true,
   image: true,
   grid: true,
   regions: true,
@@ -74,6 +79,8 @@ export interface MapHooks {
   onSelectPoi(poi: Poi | null): void
   /** Land tools: `down` on press, `move` while dragging (brush only), `end` on release. */
   onLand(tool: LandTool, phase: 'down' | 'move' | 'end', x: number, y: number, e: { altKey: boolean; shiftKey: boolean }): void
+  /** Decoration tools: `down` on press, `move` while dragging, `end` on release. */
+  onDecor(tool: DecorTool, phase: 'down' | 'move' | 'end', x: number, y: number, e: { altKey: boolean; shiftKey: boolean }): void
   /** The lasso closed: paint everything inside this outline (world coordinates). */
   onLandPolygon(points: [number, number][]): void
   /** A place dragged (or nudged) with the Move places tool. `move` while dragging, `end` once dropped. */
@@ -131,6 +138,8 @@ export class MapView {
   tool: Tool = 'pan'
   selectedId: string | null = null
   readonly land = new LandRenderer()
+  readonly decor = new DecorRenderer()
+  decorOpacity = 1
   /** Land brush radius in screen pixels. */
   brushPx = 24
   /** Draw the map picture above the land grid (for comparing while painting or seeding). */
@@ -149,7 +158,7 @@ export class MapView {
   private dragRect: { a: { x: number; y: number }; b: { x: number; y: number } } | null = null
   private pointers = new Map<number, { x: number; y: number }>()
   private gesture: {
-    mode: 'pan' | 'rect' | 'pinch' | 'crop' | 'imgxf' | 'vector' | 'poi' | 'land'
+    mode: 'pan' | 'rect' | 'pinch' | 'crop' | 'imgxf' | 'vector' | 'poi' | 'land' | 'decor'
     sx: number
     sy: number
     moved: boolean
@@ -257,7 +266,7 @@ export class MapView {
 
   fit(): void {
     if (!this.profile || !this.w || !this.hgt) return
-    const b = this.imageVisible() ? this.imageViewRect(this.tool === 'crop')! : this.profile.bounds
+    const b = this.tool === 'crop' && this.imageVisible() ? this.imageViewRect(true)! : this.profile.bounds
     const s = Math.min(this.w / (b.maxX - b.minX), this.hgt / (b.maxY - b.minY)) * 0.96
     this.view = { cx: (b.minX + b.maxX) / 2, cy: (b.minY + b.maxY) / 2, s: Math.max(MIN_S, Math.min(MAX_S, s)) }
     this.hasView = true
@@ -525,6 +534,12 @@ export class MapView {
         else this.hooks.onLand(this.tool, 'down', w.x, w.y, e)
         return
       }
+      if (isDecorTool(this.tool) && this.profile) {
+        const w = this.toWorld(p.x, p.y)
+        this.gesture = { ...base, mode: 'decor' }
+        this.hooks.onDecor(this.tool, 'down', w.x, w.y, e)
+        return
+      }
       if (this.tool === 'pmove') {
         const poi = this.poiAt(p.x, p.y)
         if (poi) {
@@ -589,6 +604,14 @@ export class MapView {
         this.updateHover(p.x, p.y)
         return
       }
+      if (g?.mode === 'decor') {
+        if (isDecorTool(this.tool)) {
+          const w = this.toWorld(p.x, p.y)
+          this.hooks.onDecor(this.tool, 'move', w.x, w.y, e)
+        }
+        this.updateHover(p.x, p.y)
+        return
+      }
       if (g?.mode === 'poi') {
         if (!g.moved && Math.hypot(p.x - g.sx, p.y - g.sy) > 2) g.moved = true
         if (g.moved) this.dragPoi(g, p.x, p.y, e, 'move')
@@ -637,6 +660,12 @@ export class MapView {
           if (lasso.length >= 3) this.hooks.onLandPolygon(lasso)
           this.invalidate()
         } else if (isLandTool(this.tool)) this.hooks.onLand(this.tool, 'end', w.x, w.y, e)
+        this.updateHover(p.x, p.y)
+        return
+      }
+      if (g.mode === 'decor') {
+        const w = this.toWorld(p.x, p.y)
+        if (isDecorTool(this.tool)) this.hooks.onDecor(this.tool, 'end', w.x, w.y, e)
         this.updateHover(p.x, p.y)
         return
       }
@@ -927,6 +956,7 @@ export class MapView {
       const picOnTop = this.imageOnTop || PICTURE_TOOLS.has(this.tool)
       if (this.imageVisible() && !editingImage && !picOnTop) this.drawImage(false)
       if (p.land && this.layers.land) this.land.draw(this.g, p.land, this.painter, this.w, this.hgt, this.landOpacity)
+      if (p.decor?.length && this.layers.decor) this.decor.draw(this.g, p.decor, this.painter, this.w, this.hgt, this.decorOpacity)
       if (this.imageVisible() && !editingImage && picOnTop) this.drawImage(false)
       this.vec.draw(this.g, this.w, this.hgt, colors)
       if (this.imageVisible() && editingImage) this.drawImage(cropping)
@@ -958,7 +988,7 @@ export class MapView {
         g.stroke()
         g.setLineDash([])
       }
-      if (this.tool === 'lbrush' && this.hover && p.land) {
+      if ((this.tool === 'lbrush' || isDecorTool(this.tool)) && this.hover && (p.land || isDecorTool(this.tool))) {
         g.beginPath()
         g.arc(this.hover.sx, this.hover.sy, this.brushPx, 0, Math.PI * 2)
         g.strokeStyle = t.text

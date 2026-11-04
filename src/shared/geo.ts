@@ -201,6 +201,22 @@ export function calibrationForBounds(width: number, height: number, b: Bounds): 
   }
 }
 
+/** The cropped picture placed over the canvas: inside it keeping proportions, or stretched to fill it. */
+export function cropToBounds(crop: Rect, b: Bounds, stretch = false): Calibration {
+  const bw = b.maxX - b.minX
+  const bh = b.maxY - b.minY
+  let w = bw
+  let h = bh
+  if (!stretch) {
+    const s = Math.min(bw / crop.w, bh / crop.h)
+    w = crop.w * s
+    h = crop.h * s
+  }
+  const cx = (b.minX + b.maxX) / 2
+  const cy = (b.minY + b.maxY) / 2
+  return rectCalibration(crop, { minX: cx - w / 2, maxX: cx + w / 2, minY: cy - h / 2, maxY: cy + h / 2 })
+}
+
 /** Pins on the crop corners that place the cropped image over a world rectangle. */
 export function rectCalibration(crop: Rect, r: Bounds): Calibration {
   const q = (n: number) => Math.round(n * 1000) / 1000

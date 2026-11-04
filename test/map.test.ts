@@ -12,6 +12,7 @@ import {
   findPosTag,
   formatKm,
   calibrationForBounds,
+  cropToBounds,
   imageToWorld,
   locate,
   nearest,
@@ -20,6 +21,7 @@ import {
   worldToImage,
   zoneRect,
 } from '../src/shared/geo'
+import { StampIndex, brushById, brushDab, eraseStamps } from '../src/ui/decor'
 import { areasAt, featuresFromJson, featuresToGeoJson, pointInRings, simplify } from '../src/shared/features'
 import { entriesFromLorebookJson, parseMapEntries } from '../src/shared/mapext'
 import { mergeInto, newProfile, parseCoordinateText, parseSpans } from '../src/shared/parser'
@@ -593,4 +595,45 @@ describe('land grid', () => {
     expect(inside.has(findCell(g, 0, 0))).toBe(false)
     expect(inside.has(findCell(g, 80, 80))).toBe(false)
   })
+
+  it('fits the cropped picture to the canvas, ignoring what was cropped away', () => {
+    const crop = { x: 100, y: 50, w: 2000, h: 1000 }
+    const b = { minX: -500, maxX: 500, minY: -500, maxY: 500 }
+    const fit = cropToBounds(crop, b)
+    const tl = imageToWorld(fit, crop.x, crop.y)
+    const br = imageToWorld(fit, crop.x + crop.w, crop.y + crop.h)
+    expect([tl.x, br.x, tl.y, br.y]).toEqual([-500, 500, 250, -250])
+    const st = cropToBounds(crop, b, true)
+    expect(imageToWorld(st, crop.x, crop.y)).toEqual({ x: -500, y: 500 })
+    expect(imageToWorld(st, crop.x + crop.w, crop.y + crop.h)).toEqual({ x: 500, y: -500 })
+  })
 })
+
+describe('decorations', () => {
+  it('scatters stamps kept apart by the brush spacing, and a click places one', () => {
+    const brush = brushById('ink-mountains')
+    const index = new StampIndex(40)
+    let seed = 1
+    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647)
+    const opts = { size: 1, variation: 0.5, density: 1 }
+    const dab = brushDab(brush, 10, opts, 0, 0, 120, index, false, rnd)
+    expect(dab.length).toBeGreaterThan(5)
+    const gap = brush.spacing * brush.size * 10
+    for (let i = 0; i < dab.length; i++) for (let j = i + 1; j < dab.length; j++) expect(Math.hypot(dab[i].x - dab[j].x, dab[i].y - dab[j].y)).toBeGreaterThanOrEqual(gap - 0.02)
+    expect(dab.every((s) => s.t === 'ink-peak' && Math.hypot(s.x, s.y) <= 120.01)).toBe(true)
+    // A click on an existing stamp finds no room; a click far away places exactly one.
+    expect(brushDab(brush, 10, opts, dab[0].x, dab[0].y, 20, index, true, rnd)).toHaveLength(0)
+    expect(brushDab(brush, 10, opts, 500, 500, 120, index, true, rnd)).toHaveLength(1)
+  })
+
+  it('erases inside the circle, optionally only one brush', () => {
+    const list = [
+      { t: 'ink-peak', x: 0, y: 0, s: 5, r: 1 },
+      { t: 'ink-tree', x: 1, y: 1, s: 2, r: 2 },
+      { t: 'ink-peak', x: 50, y: 0, s: 5, r: 3 },
+    ]
+    expect(eraseStamps(list, 0, 0, 10).map((s) => s.r)).toEqual([3])
+    expect(eraseStamps(list, 0, 0, 10, brushById('ink-trees')).map((s) => s.r)).toEqual([1, 3])
+  })
+})
+

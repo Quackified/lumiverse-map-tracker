@@ -1,11 +1,12 @@
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types'
-import { bearing, boundsOf, calibMaps, calibrationForBounds, compass, distanceUnits, formatCoord, formatKm, imageToWorld, locate, normalizeCalib, rectCalibration } from '../shared/geo'
+import { bearing, boundsOf, calibMaps, calibrationForBounds, cropToBounds, compass, distanceUnits, formatCoord, formatKm, imageToWorld, locate, normalizeCalib, rectCalibration } from '../shared/geo'
 import { FEATURE_TYPES, LAYER_LABEL, LAYER_ORDER, featuresFromJson, featuresToGeoJson, layerSettings, newFeatureId, pointInRings, simplify } from '../shared/features'
 import { entriesFromLorebookJson, hasMapData, parseMapEntries } from '../shared/mapext'
 import { mergeInto, newProfile, parseCoordinateText, slug, type ParseResult } from '../shared/parser'
 import { VAR_NAME_RE, isMoved, movePoint, placeRef, placeText, placesVarName, revertPoint } from '../shared/places'
 import { applyRefs, findCoords, guessName, resolveRefs, type CoordHit } from '../shared/convert'
 import type {
+  DecorStamp,
   BackendMessage,
   Bounds,
   Feature,
@@ -26,6 +27,8 @@ import { clear, debounce, enableScrub, h, hueOf, icon, numOrNull } from './dom'
 import { History } from './history'
 import { MapView, type Layers, type Tool } from './viewport'
 import { isVectorTool } from './vector'
+import { DECOR_BRUSHES, StampIndex, brushById, brushDab, brushPreview, decorUnit, eraseStamps } from './decor'
+import type { DecorTool } from './viewport'
 import { DENSITY_PRESETS, hasSymbols } from './terrain'
 import { BIOMES, DETAIL, MAX_CELLS, resampleGrid, cellsInRings, regionRings, EMPTY, DEFAULT_CELLS, LAKE, OCEAN, DEFAULT_LAND, biomeColor, biomeName, biomesOf, cellsWithin, encodeBytes, findCell, floodCells, graphFor, isWater, newGrid } from '../shared/cells'
 import { colorAt, detectLandmass, makeSampler, seedFromImage, wandMask, voteCells, type Sampler } from './landmap'
@@ -35,12 +38,12 @@ import { worldToImage } from '../shared/geo'
 type IconName = Parameters<typeof icon>[0]
 
 /** What the Properties panel shows: the content behind a layer, or the layer a tool works on. */
-type Panel = 'points' | 'zones' | 'land' | 'layers' | 'image'
+type Panel = 'points' | 'zones' | 'land' | 'decor' | 'layers' | 'image'
 /** Occasional tasks, opened from the top bar over the map. */
 type Dialog = 'chat' | 'import' | 'map' | 'canvas'
 
-const PANEL_TITLE: Record<Panel, string> = { points: 'Places', zones: 'Zones & regions', land: 'Terrain', layers: 'Features', image: 'Picture' }
-const DIALOG_TITLE: Record<Dialog, string> = { chat: 'Story', import: 'Import', map: 'Map settings', canvas: 'Canvas size' }
+const PANEL_TITLE: Record<Panel, string> = { points: 'Places', zones: 'Zones & regions', land: 'Terrain', decor: 'Decorations', layers: 'Features', image: 'Picture' }
+const DIALOG_TITLE: Record<Dialog, string> = { chat: 'Story', import: 'Import', map: 'Map', canvas: 'Map' }
 
 /** The tool rail, in groups, with single-key shortcuts. */
 const RAIL: { tool: Tool; icon: IconName; label: string; key: string }[][] = [
@@ -69,6 +72,10 @@ const RAIL: { tool: Tool; icon: IconName; label: string; key: string }[][] = [
     { tool: 'llasso', icon: 'lasso', label: 'Biome lasso', key: 'j' },
     { tool: 'lwand', icon: 'wand', label: 'Magic wand (from the picture)', key: 'w' },
     { tool: 'lpick', icon: 'dropper', label: 'Biome eyedropper', key: 'i' },
+  ],
+  [
+    { tool: 'dbrush', icon: 'stamp', label: 'Decoration brush', key: 'q' },
+    { tool: 'derase', icon: 'eraser', label: 'Decoration eraser', key: 'e' },
   ],
 ]
 
@@ -104,6 +111,8 @@ const TOOL_PANEL: Partial<Record<Tool, Panel>> = {
   lsample: 'land',
   lwand: 'land',
   lcoast: 'land',
+  dbrush: 'decor',
+  derase: 'decor',
   crop: 'image',
   imgxf: 'image',
 }
@@ -125,6 +134,8 @@ const TOOL_HINT: Partial<Record<Tool, string>> = {
   lfill: 'Click inside a shape to fill the shape, or anywhere else to fill the connected area. Shift+click always fills the connected area.',
   llasso: 'Drag around an area: everything inside becomes the selected biome.',
   lpick: 'Click the terrain to pick its biome, then carry on painting.',
+  dbrush: 'Drag to scatter the brush; click to place one. Size, variation and density are in the options bar.',
+  derase: 'Drag over decorations to remove them.',
   lwand: 'Click a patch of the picture: every connected spot of a similar colour becomes the selected biome. Alt+click erases it back to unpainted.',
   lcoast: 'Click the sea on the picture: water connected to it becomes ocean, enclosed water becomes lakes, everything else land.',
   lsample: 'Seeding: click the picture where it shows the selected biome to add a colour sample, then Generate.',
@@ -232,6 +243,13 @@ export class MapApp {
   private landFillShapes = true
   /** Magic wand and landmass detection: colour tolerance, and what land becomes. */
   private wandTol = 45
+  /** Decoration brush settings and the stroke in progress. */
+  private decorBrush = 'ink-mountains'
+  private decorOpts = { size: 1, variation: 0.5, density: 1 }
+  private decorOnlyBrush = false
+  private decorStroke: { list: DecorStamp[]; index: StampIndex; moved: boolean; lastX: number; lastY: number } | null = null
+  private decorFrame = 0
+  private confirmClearDecor = false
   private coastTol = 60
   private coastLand = DEFAULT_LAND
   private confirmRemoveLand = false
@@ -273,6 +291,7 @@ export class MapApp {
         onPoiMove: (id, x, y, phase) => this.onPoiMove(id, x, y, phase),
         onLand: (tool, phase, x, y, e) => this.onLand(tool, phase, x, y, e),
         onLandPolygon: (pts) => this.onLandPolygon(pts),
+        onDecor: (tool, phase, x, y, e) => this.onDecor(tool, phase, x, y, e),
         onContextMenu: (x, y, poi, cx, cy) => this.openMenu(x, y, poi, cx, cy),
         onToolDone: () => this.setTool('pan'),
         onImageEdit: (patch, phase) => this.onImageEdit(patch, phase),
@@ -577,8 +596,7 @@ export class MapApp {
         { class: 'mt-seg mt-menus' },
         menuBtn('chat', 'chat', 'Story', 'Position, destination and what the model is told'),
         menuBtn('import', 'import', 'Import', 'Coordinate notes, lorebooks, map files and lorebook conversion'),
-        menuBtn('canvas', 'canvas', 'Canvas', 'Canvas size: how far the world extends'),
-        menuBtn('map', 'gear', 'Map', 'Name, scale, new or delete map'),
+        menuBtn('map', 'gear', 'Map', 'Name, scale, canvas size, new or delete map'),
       ),
       h('div', { class: 'mt-seg' }, this.undoBtn, this.redoBtn),
       h('div', { class: 'mt-spacer' }),
@@ -679,7 +697,8 @@ export class MapApp {
   }
 
   private openDialog(d: Dialog): void {
-    if (d === 'canvas') {
+    if (d === 'canvas') d = 'map'
+    if (d === 'map') {
       this.canvasDraft = null
       this.canvasCells = null
     }
@@ -907,6 +926,7 @@ export class MapApp {
     else if (this.panel === 'zones') this.renderZonesTab(body)
     else if (this.panel === 'image') this.renderImageTab(body)
     else if (this.panel === 'layers') this.renderLayersTab(body)
+    else if (this.panel === 'decor') this.renderDecorTab(body)
     else this.renderLandTab(body)
     body.scrollTop = scroll
   }
@@ -1002,6 +1022,20 @@ export class MapApp {
           })
         }),
       row({
+        label: 'Decorations',
+        visible: L.decor,
+        onEye: () => flip('decor'),
+        on: this.panel === 'decor',
+        open: () => this.openPanel('decor'),
+        count: p.decor?.length ?? 0,
+        extra: [
+          range(this.map.decorOpacity, (v) => {
+            this.map.decorOpacity = v
+            this.map.invalidate()
+          }),
+        ],
+      }),
+      row({
         label: 'Terrain',
         visible: L.land,
         onEye: () => flip('land'),
@@ -1047,6 +1081,7 @@ export class MapApp {
     const p = this.profile
     if (p && isVectorTool(t)) bar.append(...this.shapeOptions(t))
     if (p?.land && isLandTool(t)) bar.append(...this.landOptions(t))
+    if (p && (t === 'dbrush' || t === 'derase')) bar.append(...this.decorOptions(t))
     const hint = TOOL_HINT[t]
     if (hint) bar.append(h('span', { class: 'mt-opt-hint', title: hint }, hint))
   }
@@ -1065,6 +1100,40 @@ export class MapApp {
       out.push(h('label', { class: 'mt-opt' }, h('span', { class: 'mt-dim' }, 'Type'), typeSel))
     }
     return out
+  }
+
+  private decorOptions(t: Tool): HTMLElement[] {
+    const brush = brushById(this.decorBrush)
+    const sel = h('select', { class: 'mt-select', title: 'Brush' })
+    for (const set of ['Ink', 'Painterly'] as const) {
+      const grp = h('optgroup', { label: `${set} set` })
+      for (const b of DECOR_BRUSHES) if (b.set === set) grp.append(h('option', { value: b.id, selected: b.id === brush.id }, b.name))
+      sel.append(grp)
+    }
+    sel.addEventListener('change', () => {
+      this.decorBrush = sel.value
+      if (this.panel === 'decor') this.renderSide(true)
+    })
+    const slider = (label: string, key: 'size' | 'variation' | 'density', min: number, max: number, title: string) => {
+      const r = h('input', { type: 'range', min: String(min), max: String(max), step: '0.05', value: String(this.decorOpts[key]), class: 'mt-opt-range', title })
+      const out = h('span', { class: 'mt-dim mt-mono' }, this.decorOpts[key].toFixed(2))
+      r.addEventListener('input', () => {
+        this.decorOpts[key] = Number(r.value)
+        out.textContent = Number(r.value).toFixed(2)
+      })
+      return h('label', { class: 'mt-opt' }, h('span', { class: 'mt-dim' }, label), r, out)
+    }
+    if (t === 'derase') {
+      const only = h('input', { type: 'checkbox', checked: this.decorOnlyBrush })
+      only.addEventListener('change', () => (this.decorOnlyBrush = only.checked))
+      return [h('label', { class: 'mt-opt mt-check', title: 'Leave other kinds of decoration alone' }, only, 'Only'), sel]
+    }
+    return [
+      h('label', { class: 'mt-opt' }, h('img', { class: 'mt-brush-thumb', src: brushPreview(brush), alt: '' }), sel),
+      slider('Size', 'size', 0.3, 3, 'How big each stamp is'),
+      slider('Variation', 'variation', 0, 1, 'How much sizes differ'),
+      slider('Density', 'density', 0.2, 3, 'How closely stamps pack'),
+    ]
   }
 
   private landOptions(t: Tool): HTMLElement[] {
@@ -2043,8 +2112,9 @@ export class MapApp {
         'div',
         { class: 'mt-row mt-wrap' },
         h('button', { class: `mt-btn${transforming ? ' mt-on mt-primary' : ''}`, onclick: () => this.setTool(transforming ? 'pan' : 'imgxf') }, icon('transform'), transforming ? 'Done' : 'Transform'),
-        h('button', { class: 'mt-btn mt-ghost', onclick: () => this.mutate((d) => (d.image!.calib = calibrationForBounds(d.image!.width, d.image!.height, d.bounds))) }, 'Fit to map bounds'),
-        h('button', { class: 'mt-btn mt-ghost', onclick: () => this.map.fit() }, 'Fit view'),
+        h('button', { class: 'mt-btn mt-ghost', title: 'The cropped picture inside the canvas, centred, keeping its proportions', onclick: () => this.mutate((d) => (d.image!.calib = cropToBounds(d.image!.crop, d.bounds))) }, 'Fit to canvas'),
+        h('button', { class: 'mt-btn mt-ghost', title: 'The cropped picture stretched to fill the canvas exactly', onclick: () => this.mutate((d) => (d.image!.calib = cropToBounds(d.image!.crop, d.bounds, true))) }, 'Stretch to canvas'),
+        h('button', { class: 'mt-btn mt-ghost', title: 'Move the picture so its centre is the canvas centre', onclick: () => place({ cx: (p.bounds.minX + p.bounds.maxX) / 2, cy: (p.bounds.minY + p.bounds.maxY) / 2, w: rw, h: rh }) }, 'Centre on canvas'),
       ),
       transforming ? h('div', { class: 'mt-dim' }, 'Drag inside to move. Corners scale (Shift keeps proportions); edges stretch one side to squash or widen.') : '',
       h('div', { class: 'mt-form mt-form-4' }, h('label', null, 'Centre X'), field('cx', cx), h('label', null, 'Centre Y'), field('cy', cy), h('label', null, 'Width'), field('w', rw), h('label', null, 'Height'), field('h', rh)),
@@ -2179,12 +2249,14 @@ export class MapApp {
       this.map.imageOnTop = onTop.checked
       this.map.invalidate()
     })
-    const symbols = h('input', { type: 'checkbox', checked: grid.symbols !== false })
+    const symbols = h('input', { type: 'checkbox', checked: grid.symbols === true })
     symbols.addEventListener('change', () =>
       this.mutate((d) => {
-        d.land!.symbols = symbols.checked ? undefined : false
+        d.land!.symbols = symbols.checked ? true : undefined
       }),
     )
+    const coast = h('select', { class: 'mt-select', title: 'How the shoreline is drawn' }, h('option', { value: 'soft', selected: grid.coast !== 'ink' }, 'Soft glow'), h('option', { value: 'ink', selected: grid.coast === 'ink' }, 'Inked, with water hatching'))
+    coast.addEventListener('change', () => this.mutate((d) => d.land && (d.land.coast = coast.value === 'ink' ? 'ink' : undefined)))
     const detail = h('select', { class: 'mt-select', title: 'How many cells: more means finer painting' })
     const opts = DETAIL.some(([n]) => n === grid.cells) ? DETAIL : ([[grid.cells, 'Current'], ...DETAIL] as [number, string][])
     for (const [n, label] of opts) detail.append(h('option', { value: String(n), selected: n === grid.cells }, `${label} (~${n.toLocaleString()} cells)`))
@@ -2192,7 +2264,7 @@ export class MapApp {
     body.append(
       h('h4', null, 'Display'),
       h('div', { class: 'mt-row mt-wrap' }, h('label', { class: 'mt-check' }, symbols, 'Terrain symbols'), h('label', { class: 'mt-check', title: 'Show the map picture above the terrain, at its own opacity' }, onTop, 'Picture on top')),
-      h('div', { class: 'mt-form' }, h('label', null, 'Detail'), detail),
+      h('div', { class: 'mt-form' }, h('label', null, 'Detail'), detail, h('label', null, 'Coast'), coast),
     )
 
     body.append(this.landSeedBox(grid))
@@ -2270,6 +2342,121 @@ export class MapApp {
       d.features = [...(d.features ?? []).filter((f) => !(f.layer === 'landmass' && f.note === DETECTED_COAST)), ...lines]
     })
     this.warn(`Saved ${lines.length} coastline outline${lines.length === 1 ? '' : 's'} in Features > Outlines.`)
+  }
+
+  /** Decorations: the brush list (both sets, with previews), and clearing. */
+  private renderDecorTab(body: HTMLElement): void {
+    const p = this.profile!
+    body.append(
+      h('div', { class: 'mt-dim' }, 'Mountains, forests, hills, dunes and more, scattered with brushes on top of the terrain. Pick a brush, then drag with the Decoration brush (Q); click to place a single stamp. The Eraser (E) removes them.'),
+    )
+    for (const set of ['Ink', 'Painterly'] as const) {
+      const grid = h('div', { class: 'mt-brushes' })
+      for (const b of DECOR_BRUSHES.filter((x) => x.set === set))
+        grid.append(
+          h(
+            'button',
+            {
+              class: `mt-brush${b.id === this.decorBrush ? ' mt-on' : ''}`,
+              title: b.name,
+              onclick: () => {
+                this.decorBrush = b.id
+                if (this.map.tool !== 'dbrush') this.pickTool('dbrush')
+                else {
+                  this.renderSide(true)
+                  this.renderOptions()
+                }
+              },
+            },
+            h('img', { src: brushPreview(b), alt: '' }),
+            h('span', null, b.name),
+          ),
+        )
+      body.append(h('h4', null, `${set} set`), grid)
+    }
+    const n = p.decor?.length ?? 0
+    body.append(
+      h(
+        'div',
+        { class: 'mt-row' },
+        h('span', { class: 'mt-dim' }, `${n.toLocaleString()} decoration${n === 1 ? '' : 's'}`),
+        h('span', { class: 'mt-spacer' }),
+        h(
+          'button',
+          {
+            class: `mt-btn${this.confirmClearDecor ? ' mt-danger' : ' mt-ghost'}`,
+            disabled: !n,
+            onclick: () => {
+              if (!this.confirmClearDecor) {
+                this.confirmClearDecor = true
+                return this.renderSide(true)
+              }
+              this.confirmClearDecor = false
+              this.mutate((d) => {
+                delete d.decor
+              })
+            },
+          },
+          this.confirmClearDecor ? 'Confirm clear' : 'Clear decorations',
+        ),
+      ),
+    )
+  }
+
+  /** Decoration brush and eraser strokes, committed once a frame and undone as one step. */
+  private onDecor(tool: DecorTool, phase: 'down' | 'move' | 'end', x: number, y: number, _e: { altKey: boolean; shiftKey: boolean }): void {
+    const p = this.profile
+    if (!p) return
+    const unit = decorUnit(p.bounds)
+    const radius = this.map.brushPx * this.map.unitsPerPx()
+    const brush = brushById(this.decorBrush)
+    if (phase === 'down') {
+      const list = [...(p.decor ?? [])]
+      const index = new StampIndex(unit * 4)
+      for (const st of list) index.add(st)
+      this.decorStroke = { list, index, moved: false, lastX: x, lastY: y }
+      this.editGroup = `decor-${Date.now()}`
+    }
+    const st = this.decorStroke
+    if (!st) return
+    if (phase === 'move') {
+      if (!st.moved && Math.hypot(x - st.lastX, y - st.lastY) < radius * 0.15) return
+      st.moved = true
+    }
+    if (tool === 'derase') {
+      if (phase !== 'end') st.list = eraseStamps(st.list, x, y, radius, this.decorOnlyBrush ? brush : undefined)
+    } else if (phase === 'move') {
+      // A dab per step of about a third of the brush, so a slow drag doesn't pile up.
+      if (Math.hypot(x - st.lastX, y - st.lastY) < radius * 0.33 && st.moved) return
+      st.list.push(...brushDab(brush, unit, this.decorOpts, x, y, radius, st.index))
+      st.lastX = x
+      st.lastY = y
+    } else if (phase === 'end' && !st.moved) {
+      // A click places one stamp right there.
+      st.list.push(...brushDab(brush, unit, this.decorOpts, x, y, radius, st.index, true))
+    }
+    if (phase !== 'end') {
+      if (!this.decorFrame) this.decorFrame = requestAnimationFrame(() => {
+        this.decorFrame = 0
+        if (this.decorStroke) this.commitDecor(false)
+      })
+      return
+    }
+    if (this.decorFrame) cancelAnimationFrame(this.decorFrame)
+    this.decorFrame = 0
+    this.commitDecor(true)
+    this.decorStroke = null
+    this.editGroup = null
+  }
+
+  private commitDecor(final: boolean): void {
+    const st = this.decorStroke
+    if (!st || !this.profile) return
+    const list = st.list.slice()
+    this.mutate((d) => {
+      if (list.length) d.decor = list
+      else delete d.decor
+    }, final)
   }
 
   /** A shape that "Paint shapes as terrain" understands. */
@@ -2831,11 +3018,11 @@ export class MapApp {
     const p = this.profile!
     const d = (this.canvasDraft ??= { ...p.bounds })
     const grid = p.land
-    const cx = (d.minX + d.maxX) / 2
-    const cy = (d.minY + d.maxY) / 2
+    // Centred on 0: width 1000 spans -500 to 500, whatever the old centre was.
+    const cx = 0
+    const cy = 0
     let w = d.maxX - d.minX
     let hh = d.maxY - d.minY
-    const ratio = hh > 0 && w > 0 ? hh / w : 1
     const area = (b: Bounds) => Math.max(1e-9, (b.maxX - b.minX) * (b.maxY - b.minY))
     const span = h('div', { class: 'mt-dim' })
     const landInfo = h('div', { class: 'mt-dim' })
@@ -2879,14 +3066,14 @@ export class MapApp {
       const v = read(wIn)
       if (v === null) return
       w = v
-      if (this.canvasLinked) hh = v * ratio
+      if (this.canvasLinked) hh = v
       refresh()
     })
     hIn.addEventListener('input', () => {
       const v = read(hIn)
       if (v === null) return
       hh = v
-      if (this.canvasLinked) w = v / ratio
+      if (this.canvasLinked) w = v
       refresh()
     })
     for (const el of [wIn, hIn]) el.addEventListener('change', () => refresh())
@@ -2902,7 +3089,6 @@ export class MapApp {
         if (q.land) q.land = resampleGrid(q.land, bounds, cells)
       })
       this.canvasDraft = null
-      this.dialog = null
       this.renderSide(true)
       this.map.fit()
       this.warn(`Canvas is now ${round2(bounds.maxX - bounds.minX)} \u00d7 ${round2(bounds.maxY - bounds.minY)}.`)
@@ -2911,16 +3097,23 @@ export class MapApp {
       'button',
       {
         class: `mt-btn mt-icon-btn mt-link-btn${this.canvasLinked ? ' mt-on' : ''}`,
-        title: this.canvasLinked ? 'Proportions linked: changing one changes the other' : 'Width and height change separately',
+        title: this.canvasLinked ? 'Linked: width and height stay the same' : 'Width and height change separately',
         onclick: () => {
           this.canvasLinked = !this.canvasLinked
+          if (this.canvasLinked) {
+            const m = Math.max(d.maxX - d.minX, d.maxY - d.minY)
+            d.minX = -m / 2
+            d.maxX = m / 2
+            d.minY = -m / 2
+            d.maxY = m / 2
+          }
           this.renderSide(true)
         },
       },
       icon(this.canvasLinked ? 'link' : 'unlink'),
     )
     body.append(
-      h('div', { class: 'mt-dim' }, 'How big the world is, in map units. It grows or shrinks around its centre. Places, zones and shapes stay where they are.'),
+      h('div', { class: 'mt-dim' }, 'How big the world is, in map units, centred on 0: a width of 1000 runs from -500 to 500. Places, zones and shapes stay where they are.'),
       h(
         'div',
         { class: 'mt-canvas-size' },
@@ -2966,7 +3159,7 @@ export class MapApp {
         h('div', { class: 'mt-form' }, h('label', null, 'Detail'), detail),
         landInfo,
       )
-    body.append(h('div', { class: 'mt-row' }, apply, h('button', { class: 'mt-btn', onclick: () => this.closeDialog() }, 'Cancel')))
+    body.append(h('div', { class: 'mt-row' }, apply))
     refresh()
   }
 
@@ -2981,10 +3174,10 @@ export class MapApp {
       if (v && v > 0) this.mutate((d) => (d.unitKm = v))
     })
     const isDefault = s?.settings.defaultProfileId === p.id
+    body.append(h('div', { class: 'mt-form' }, h('label', null, 'Name'), name, h('label', null, '1 unit ='), h('div', { class: 'mt-row' }, unit, h('span', null, 'km'))), h('h4', null, 'Canvas size'))
+    this.renderCanvasTab(body)
     body.append(
-      h('div', { class: 'mt-form' }, h('label', null, 'Name'), name, h('label', null, '1 unit ='), h('div', { class: 'mt-row' }, unit, h('span', null, 'km'))),
-      h('h4', null, 'Canvas'),
-      h('div', { class: 'mt-row mt-wrap' }, h('span', { class: 'mt-mono' }, fmtBounds(p.bounds)), h('button', { class: 'mt-btn', onclick: () => this.openDialog('canvas') }, icon('canvas'), 'Canvas size…')),
+      h('h4', null, 'Map'),
       h(
         'label',
         { class: 'mt-check' },

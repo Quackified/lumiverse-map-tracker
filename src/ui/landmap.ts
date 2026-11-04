@@ -94,6 +94,86 @@ export class LandRenderer {
     return this.built
   }
 
+  private hatchCanvas: HTMLCanvasElement | null = null
+  private bandCanvas: HTMLCanvasElement | null = null
+
+  /**
+   * Inked water: short horizontal strokes in the sea, densest against the shore.
+   * Rows and strokes are anchored to the world (a hash of row and slot), so they
+   * hold still while panning; a band stroked along the coast fades them out.
+   */
+  private drawHatching(g: CanvasRenderingContext2D, built: Built, base: DOMMatrix, s: number, o: { x: number; y: number }): void {
+    if (!built.ocean) return
+    const cw = g.canvas.width
+    const ch = g.canvas.height
+    const hc = (this.hatchCanvas ??= document.createElement('canvas'))
+    const bc = (this.bandCanvas ??= document.createElement('canvas'))
+    for (const c of [hc, bc]) if (c.width !== cw || c.height !== ch) (c.width = cw), (c.height = ch)
+    const h = hc.getContext('2d')
+    const b = bc.getContext('2d')
+    if (!h || !b) return
+    h.setTransform(1, 0, 0, 1, 0, 0)
+    h.globalCompositeOperation = 'source-over'
+    h.clearRect(0, 0, cw, ch)
+    h.setTransform(base)
+    const viewW = cw / base.a
+    const viewH = ch / base.d
+    const row = 4.5 / s
+    const slot = row * 3.4
+    const hash = (a: number, c: number) => {
+      let n = Math.imul(a, 374761393) + Math.imul(c, 668265263)
+      n = Math.imul(n ^ (n >>> 13), 1274126177)
+      return ((n ^ (n >>> 16)) >>> 0) / 4294967296
+    }
+    const wy0 = (o.y - viewH) / s
+    const wy1 = o.y / s
+    const wx0 = -o.x / s
+    const wx1 = (viewW - o.x) / s
+    h.strokeStyle = '#1f4670'
+    h.lineCap = 'round'
+    h.lineWidth = 1.35
+    h.beginPath()
+    for (let k = Math.floor(wy0 / row); k <= Math.ceil(wy1 / row); k++) {
+      const sy = o.y - k * row * s
+      for (let j = Math.floor(wx0 / slot) - 1; j <= Math.ceil(wx1 / slot); j++) {
+        if (hash(k, j) > 0.62) continue
+        const x0 = (j + hash(j, k) * 0.5) * slot
+        const len = slot * (0.3 + hash(k + 7, j - 3) * 0.6)
+        h.moveTo(o.x + x0 * s, sy)
+        h.lineTo(o.x + (x0 + len) * s, sy)
+      }
+    }
+    h.stroke()
+    // The band: the coast stroked wide, strongest at the shore.
+    b.setTransform(1, 0, 0, 1, 0, 0)
+    b.clearRect(0, 0, cw, ch)
+    b.setTransform(base)
+    b.translate(o.x, o.y)
+    b.scale(s, -s)
+    b.lineJoin = 'round'
+    b.strokeStyle = '#000'
+    for (const [px, a] of [
+      [64, 0.3],
+      [40, 0.6],
+      [20, 1],
+    ]) {
+      b.globalAlpha = a
+      b.lineWidth = px / s
+      b.stroke(built.coast)
+    }
+    b.globalAlpha = 1
+    h.setTransform(1, 0, 0, 1, 0, 0)
+    h.globalCompositeOperation = 'destination-in'
+    h.drawImage(bc, 0, 0)
+    h.globalCompositeOperation = 'source-over'
+    // Only on the sea (the clip is set in world coordinates, then drawn in pixels).
+    g.save()
+    g.clip(built.ocean, 'evenodd')
+    g.setTransform(1, 0, 0, 1, 0, 0)
+    g.drawImage(hc, 0, 0)
+    g.restore()
+  }
+
   /** The biome under a world point, or null outside the grid. */
   biomeAt(grid: LandGrid, x: number, y: number): number | null {
     const b = grid.bounds
@@ -109,6 +189,8 @@ export class LandRenderer {
     const o = p.toScreen(0, 0)
     g.save()
     g.globalAlpha *= opacity
+    const base = g.getTransform()
+    const inked = grid.coast === 'ink'
     g.save()
     g.translate(o.x, o.y)
     g.scale(s, -s)
@@ -121,6 +203,9 @@ export class LandRenderer {
       g.lineWidth = built.cell * 0.9
       g.fill(built.ocean, 'evenodd')
       g.stroke(built.ocean)
+      if (inked) this.drawHatching(g, built, base, s, o)
+    }
+    if (built.ocean && !inked) {
       // Shallow water: soft bands just off the coast.
       g.save()
       g.clip(built.ocean, 'evenodd')
@@ -147,13 +232,13 @@ export class LandRenderer {
       g.fillStyle = biomeColor(LAKE, grid)
       g.fill(built.lakes, 'evenodd')
     }
-    g.strokeStyle = 'rgba(40, 52, 60, 0.85)'
-    g.lineWidth = 1.3 / s
+    g.strokeStyle = inked ? '#151515' : 'rgba(40, 52, 60, 0.85)'
+    g.lineWidth = (inked ? 2.8 : 1.3) / s
     g.stroke(built.coast)
     if (built.lakes) g.stroke(built.lakes)
     g.restore()
 
-    if (grid.symbols !== false) {
+    if (grid.symbols === true) {
       for (const r of built.regions) {
         const sym = BIOME_SYMBOLS[r.biome]
         if (!sym) continue

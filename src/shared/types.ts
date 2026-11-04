@@ -144,6 +144,8 @@ export interface LandGrid {
   samples?: { biome: number; rgb: [number, number, number] }[]
   /** Draw the tree / hill / mountain symbols inside matching biomes. */
   symbols?: boolean
+  /** Coast style: a soft shallow-water glow (default) or an inked shoreline with water hatching. */
+  coast?: 'soft' | 'ink'
 }
 
 export interface LayerSettings {
@@ -167,6 +169,8 @@ export interface WorldProfile {
   imageTemplate?: MapImageMeta
   /** Land grid: cells with biomes, drawn as the map's land and sea. */
   land?: LandGrid
+  /** Decoration stamps: mountains, forests, dunes and the like, placed with brushes. */
+  decor?: DecorStamp[]
   /** Global variable the place coordinates are published to (e.g. "endwright_places"). Unset = off. */
   placesVar?: string
   /** The raw coordinate text this profile was last imported from. */
@@ -291,3 +295,12 @@ export type BackendMessage =
   | { type: 'lorebookBackups'; backups: LorebookBackupSummary[] }
   | { type: 'lorebookApplied'; bookId: string; written: number; skipped: string[] }
   | { type: 'notice'; level: 'info' | 'success' | 'warning' | 'error'; message: string }
+
+/** One decoration: a brush stamp of kind `t` standing at (x, y), `s` world units across, drawn from seed `r`. */
+export interface DecorStamp {
+  t: string
+  x: number
+  y: number
+  s: number
+  r: number
+}

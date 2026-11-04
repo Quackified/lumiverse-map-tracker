@@ -91,6 +91,11 @@ export interface MapImageMeta {
   calib: Calibration
   opacity: number
   visible: boolean
+  /**
+   * Texture overlay: blend the picture over the terrain and decorations
+   * (multiply, overlay, soft light) instead of showing it underneath.
+   */
+  blend?: 'multiply' | 'overlay' | 'soft-light'
   /** Bumped whenever the image bytes change, so clients can cache by revision. */
   rev: number
 }
@@ -123,6 +128,8 @@ export interface Feature {
   density?: number
   color?: string
   hidden?: boolean
+  /** Already turned into decoration stamps (so it isn't converted twice). */
+  decorated?: boolean
 }
 
 /**
@@ -146,6 +153,8 @@ export interface LandGrid {
   symbols?: boolean
   /** Coast style: a soft shallow-water glow (default) or an inked shoreline with water hatching. */
   coast?: 'soft' | 'ink'
+  /** Blend biome colours softly into each other, with gentle light and dark shading, instead of crisp cells. */
+  blend?: boolean
 }
 
 export interface LayerSettings {
@@ -238,7 +247,7 @@ export type FrontendMessage =
   | { type: 'saveProfile'; profile: WorldProfile }
   | { type: 'importProfile'; profile: WorldProfile }
   | { type: 'deleteProfile'; profileId: string }
-  | { type: 'setImage'; profileId: string; dataUrl: string; width: number; height: number; mime: string }
+  | { type: 'setImage'; profileId: string; dataUrl: string; width: number; height: number; mime: string; /** Place it over the whole canvas, ignoring the old picture's crop and placement (a baked map). */ fit?: boolean }
   | { type: 'getImage'; profileId: string }
   | { type: 'removeImage'; profileId: string }
   | { type: 'setChatProfile'; chatId: string; profileId: string | null }
@@ -255,6 +264,10 @@ export type FrontendMessage =
   | { type: 'applyLorebookRefs'; bookId: string; bookName: string; changes: { id: string; name: string; before: string; after: string }[] }
   | { type: 'listLorebookBackups' }
   | { type: 'restoreLorebookBackup'; backupId: string }
+  | { type: 'listStamps' }
+  | { type: 'getStampImages'; ids: string[] }
+  | { type: 'saveStamp'; stamp: StampAsset; dataUrl: string }
+  | { type: 'deleteStamp'; id: string }
 
 export interface StatePayload {
   type: 'state'
@@ -295,6 +308,18 @@ export type BackendMessage =
   | { type: 'lorebookBackups'; backups: LorebookBackupSummary[] }
   | { type: 'lorebookApplied'; bookId: string; written: number; skipped: string[] }
   | { type: 'notice'; level: 'info' | 'success' | 'warning' | 'error'; message: string }
+  | { type: 'stamps'; stamps: StampAsset[] }
+  | { type: 'stampImages'; images: { id: string; dataUrl: string }[] }
+
+/** A picture stamp in the user's library (shared by all maps); its image is stored on its own. */
+export interface StampAsset {
+  id: string
+  name: string
+  /** Stamps in a group make one brush, picked at random. */
+  group: string
+  w: number
+  h: number
+}
 
 /** One decoration: a brush stamp of kind `t` standing at (x, y), `s` world units across, drawn from seed `r`. */
 export interface DecorStamp {

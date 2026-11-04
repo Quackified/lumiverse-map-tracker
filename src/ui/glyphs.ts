@@ -280,4 +280,67 @@ function shard(g, x, y, W, H, a, rnd) {
   g.restore();
 }
 
-export { mulberry, ink, curve, softShadow, tick, hill, ridge, lobedPath, canopyMass, crownCluster, tree, conifer, dune, sandPeak, snowPeak, crystal, iceSpires, cone, darkPeak, fissure, strokePath, fillPoly, inkPeak, inkForest, lollipop, deadTree, inkHill, inkCliff, lavaCap, shard, INK, K }
+/** A wandering, branching path for veins and cracks: returns polylines, the trunk first. */
+function veinPaths(x, y, L, rnd, branches) {
+  const walk = (sx, sy, a, len, steps) => { const pts = [[sx, sy]]; let px = sx, py = sy; for (let i = 0; i < steps; i++) { a += (rnd() - 0.5) * 0.7; px += Math.cos(a) * len / steps; py += Math.sin(a) * len / steps; pts.push([px, py]); } return pts; };
+  const a0 = rnd() * Math.PI * 2;
+  const trunk = walk(x - Math.cos(a0) * L / 2, y - Math.sin(a0) * L / 2, a0, L, 10);
+  const out = [trunk];
+  for (let b = 0; b < branches; b++) { const i = 2 + Math.floor(rnd() * 6); const [bx, by] = trunk[i]; out.push(walk(bx, by, a0 + (rnd() < 0.5 ? -1 : 1) * (0.5 + rnd() * 0.7), L * (0.25 + rnd() * 0.3), 5)); }
+  return out;
+}
+/** Lava: a black edge, flat orange, a hot core, tapering along the flow. */
+function lavaLine(g, pts, w) {
+  // Own taper (no pen-width cap), so the black edge, the orange and the hot core stay nested.
+  for (const [color, k] of [[K, 1.7], ['#e2461d', 1.05], ['#ffb04a', 0.38]]) {
+    g.save(); g.strokeStyle = color; g.lineCap = 'round'; g.lineJoin = 'round';
+    for (let i = 1; i < pts.length; i++) { const t = i / (pts.length - 1); g.lineWidth = Math.max(0.6, w * k * (1 - t * 0.65)); g.beginPath(); g.moveTo(pts[i - 1][0], pts[i - 1][1]); g.lineTo(pts[i][0], pts[i][1]); g.stroke(); }
+    g.restore();
+  }
+}
+function inkLava(g, x, y, L, rnd) {
+  const w = Math.max(1.8, L * 0.035);
+  for (const path of veinPaths(x, y, L, rnd, 1 + Math.floor(rnd() * 3))) lavaLine(g, path, w * (path.length > 6 ? 1 : 0.65));
+}
+/** A dry fissure: a jagged black crack with a brown lip below it. */
+function inkFissure(g, x, y, L, rnd) {
+  const w = Math.max(1.4, L * 0.04);
+  for (const path of veinPaths(x, y, L, rnd, 1 + Math.floor(rnd() * 2))) {
+    const jag = path.map(([px, py], i) => [px + (i % 2 ? 1 : -1) * L * 0.012, py]);
+    ink(g, jag.map(([px, py]) => [px + w * 0.4, py + w * 0.6]), w * 1.2, '#7c6741', 0.8, false, true);
+    ink(g, jag, w * (path.length > 6 ? 1 : 0.7), K, 1, false, true);
+  }
+}
+/** An ink volcano: crater cone in two ash tones; active ones glow in the crater and pour lava veins down the slopes. */
+function inkVolcano(g, x, y, W, rnd, active) {
+  const H = W * (0.5 + rnd() * 0.12), cw = W * 0.14;
+  const L = [x - W / 2, y], R = [x + W / 2, y], TL = [x - cw, y - H], TR = [x + cw, y - H * 0.97], foot = [x + W * 0.06, y];
+  const left = [L, ...curve(L, [x - W * 0.3, y - H * 0.25], [x - W * 0.18, y - H * 0.7], TL, 8).slice(1), [x, y - H * 1.01], foot];
+  const right = [[x, y - H * 1.01], TR, ...curve(TR, [x + W * 0.18, y - H * 0.7], [x + W * 0.3, y - H * 0.25], R, 8).slice(1), foot];
+  fillPoly(g, left, '#857d77');
+  fillPoly(g, right, '#524b46');
+  const lw = Math.min(Math.max(1.3, W * 0.03), 2.6);
+  strokePath(g, curve(L, [x - W * 0.3, y - H * 0.25], [x - W * 0.18, y - H * 0.7], TL, 8), lw);
+  strokePath(g, curve(TR, [x + W * 0.18, y - H * 0.7], [x + W * 0.3, y - H * 0.25], R, 8), lw);
+  for (let i = 0; i < 3; i++) strokePath(g, [[x + cw * (0.4 + i * 0.5), y - H * 0.88], [x + W * (0.1 + i * 0.09), y - H * (0.3 - i * 0.06)]], lw * 0.55);
+  // Crater.
+  g.beginPath(); g.ellipse(x, y - H * 0.985, cw * 1.05, W * 0.035, 0, 0, Math.PI * 2);
+  g.fillStyle = active ? '#e2461d' : '#2b2420'; g.fill(); g.lineWidth = lw; g.strokeStyle = K; g.stroke();
+  if (active) {
+    g.beginPath(); g.ellipse(x - cw * 0.15, y - H * 0.995, cw * 0.55, W * 0.016, 0, 0, Math.PI * 2); g.fillStyle = '#ffb04a'; g.fill();
+    // Lava veins down the slopes, some splitting.
+    const n = 3 + Math.floor(rnd() * 3);
+    for (let k = 0; k < n; k++) {
+      let px = x + (rnd() - 0.5) * cw * 1.6, py = y - H * 0.97; const pts = [[px, py]]; const dir = (px - x) / cw + (rnd() - 0.5) * 0.8;
+      const steps = 8 + Math.floor(rnd() * 4);
+      for (let s = 0; s < steps; s++) { px += dir * W * 0.03 + (rnd() - 0.5) * W * 0.03; py += H * (0.08 + rnd() * 0.05); if (py > y - H * 0.04) break; pts.push([px, py]); }
+      lavaLine(g, pts, Math.max(1.6, W * 0.03));
+      if (rnd() < 0.4 && pts.length > 4) { const [bx, by] = pts[2]; lavaLine(g, [[bx, by], [bx + dir * W * 0.08 + W * 0.04, by + H * 0.12], [bx + dir * W * 0.12 + W * 0.07, by + H * 0.25]], Math.max(1.2, W * 0.02)); }
+    }
+    // A little inked smoke.
+    for (let k = 0; k < 2; k++) { const sx = x + (k - 0.3) * W * 0.12, sy = y - H - W * (0.12 + k * 0.11), r = W * (0.06 + k * 0.02);
+      g.beginPath(); g.arc(sx, sy, r, 0, Math.PI * 2); g.fillStyle = '#9a938d'; g.fill(); g.lineWidth = lw * 0.7; g.strokeStyle = K; g.stroke(); }
+  }
+}
+
+export { veinPaths, lavaLine, inkLava, inkFissure, inkVolcano, mulberry, ink, curve, softShadow, tick, hill, ridge, lobedPath, canopyMass, crownCluster, tree, conifer, dune, sandPeak, snowPeak, crystal, iceSpires, cone, darkPeak, fissure, strokePath, fillPoly, inkPeak, inkForest, lollipop, deadTree, inkHill, inkCliff, lavaCap, shard, INK, K }

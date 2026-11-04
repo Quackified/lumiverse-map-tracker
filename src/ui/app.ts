@@ -7,6 +7,7 @@ import { VAR_NAME_RE, isMoved, movePoint, placeRef, placeText, placesVarName, re
 import { applyRefs, findCoords, guessName, resolveRefs, type CoordHit } from '../shared/convert'
 import type {
   DecorStamp,
+  StampAsset,
   BackendMessage,
   Bounds,
   Feature,
@@ -27,7 +28,8 @@ import { clear, debounce, enableScrub, h, hueOf, icon, numOrNull } from './dom'
 import { History } from './history'
 import { MapView, type Layers, type Tool } from './viewport'
 import { isVectorTool } from './vector'
-import { DECOR_BRUSHES, StampIndex, brushById, brushDab, brushPreview, decorUnit, eraseStamps } from './decor'
+import { DECOR_BRUSHES, StampIndex, brushById, brushDab, brushPreview, convertibleToDecor, decorFromShapes, decorUnit, eraseStamps, setStampLibrary, yourDecorBrushes, type DecorBrush } from './decor'
+import { cutOut, sourceFrom, trimmed } from './stampcut'
 import type { DecorTool } from './viewport'
 import { DENSITY_PRESETS, hasSymbols } from './terrain'
 import { BIOMES, DETAIL, MAX_CELLS, resampleGrid, cellsInRings, regionRings, EMPTY, DEFAULT_CELLS, LAKE, OCEAN, DEFAULT_LAND, biomeColor, biomeName, biomesOf, cellsWithin, encodeBytes, findCell, floodCells, graphFor, isWater, newGrid } from '../shared/cells'
@@ -40,10 +42,10 @@ type IconName = Parameters<typeof icon>[0]
 /** What the Properties panel shows: the content behind a layer, or the layer a tool works on. */
 type Panel = 'points' | 'zones' | 'land' | 'decor' | 'layers' | 'image'
 /** Occasional tasks, opened from the top bar over the map. */
-type Dialog = 'chat' | 'import' | 'map' | 'canvas'
+type Dialog = 'chat' | 'import' | 'map' | 'canvas' | 'stamp'
 
 const PANEL_TITLE: Record<Panel, string> = { points: 'Places', zones: 'Zones & regions', land: 'Terrain', decor: 'Decorations', layers: 'Features', image: 'Picture' }
-const DIALOG_TITLE: Record<Dialog, string> = { chat: 'Story', import: 'Import', map: 'Map', canvas: 'Map' }
+const DIALOG_TITLE: Record<Dialog, string> = { chat: 'Story', import: 'Import', map: 'Map', canvas: 'Map', stamp: 'New stamp' }
 
 /** The tool rail, in groups, with single-key shortcuts. */
 const RAIL: { tool: Tool; icon: IconName; label: string; key: string }[][] = [
@@ -113,6 +115,7 @@ const TOOL_PANEL: Partial<Record<Tool, Panel>> = {
   lcoast: 'land',
   dbrush: 'decor',
   derase: 'decor',
+  scut: 'decor',
   crop: 'image',
   imgxf: 'image',
 }
@@ -136,6 +139,7 @@ const TOOL_HINT: Partial<Record<Tool, string>> = {
   lpick: 'Click the terrain to pick its biome, then carry on painting.',
   dbrush: 'Drag to scatter the brush; click to place one. Size, variation and density are in the options bar.',
   derase: 'Drag over decorations to remove them.',
+  scut: 'Drag a box around something on the picture (a mountain, a tree, a castle) to make it a stamp.',
   lwand: 'Click a patch of the picture: every connected spot of a similar colour becomes the selected biome. Alt+click erases it back to unpainted.',
   lcoast: 'Click the sea on the picture: water connected to it becomes ocean, enclosed water becomes lakes, everything else land.',
   lsample: 'Seeding: click the picture where it shows the selected biome to add a colour sample, then Generate.',
@@ -162,6 +166,7 @@ interface UiPrefs {
   side: boolean
   layers: Layers
   layersOpen: boolean
+  snap: boolean
 }
 
 function loadUi(): Partial<UiPrefs> {
@@ -222,6 +227,7 @@ export class MapApp {
   private history = new History()
   private undoBtn!: HTMLButtonElement
   private gridBtn!: HTMLButtonElement
+  private snapBtn!: HTMLButtonElement
   private redoBtn!: HTMLButtonElement
   /** Groups a run of edits (a drag, a scrub) into one undo step. */
   private editGroup: string | null = null
@@ -250,6 +256,14 @@ export class MapApp {
   private decorStroke: { list: DecorStamp[]; index: StampIndex; moved: boolean; lastX: number; lastY: number } | null = null
   private decorFrame = 0
   private confirmClearDecor = false
+  /** The user's picture stamps (shared by all maps) and their loaded images. */
+  private stamps: StampAsset[] = []
+  private stampImages = new Map<string, HTMLImageElement>()
+  private stampData = new Map<string, string>()
+  private stampsAsked = false
+  private confirmDeleteStamp: string | null = null
+  /** The stamp being made: its source, background removal, name and group. */
+  private stampEdit: { src: HTMLCanvasElement; edges: boolean; tolerance: number; seeds: [number, number][]; name: string; group: string } | null = null
   private coastTol = 60
   private coastLand = DEFAULT_LAND
   private confirmRemoveLand = false
@@ -303,6 +317,7 @@ export class MapApp {
       rulerY,
     )
     if (prefs.layers) this.map.layers = { ...this.map.layers, ...prefs.layers }
+    if (prefs.snap === false) this.map.snapOn = false
 
     this.hint = h('div', { class: 'mt-hint' })
     this.hint.hidden = true
@@ -483,7 +498,7 @@ export class MapApp {
 
   private savePrefs(): void {
     try {
-      localStorage.setItem(UI_KEY, JSON.stringify({ panel: this.panel, side: this.sideOpen, layers: this.map.layers, layersOpen: this.layersOpen }))
+      localStorage.setItem(UI_KEY, JSON.stringify({ panel: this.panel, side: this.sideOpen, layers: this.map.layers, layersOpen: this.layersOpen, snap: this.map.snapOn }))
     } catch {
       /* ignore */
     }
@@ -498,6 +513,10 @@ export class MapApp {
   handle(msg: BackendMessage): void {
     switch (msg.type) {
       case 'state':
+        if (!this.stampsAsked) {
+          this.stampsAsked = true
+          this.send({ type: 'listStamps' })
+        }
         this.state = msg
         if (msg.profile?.id !== this.profile?.id) this.history.clear()
         if (!this.pendingSave || msg.profile?.id !== this.profile?.id) this.profile = withPins(msg.profile)
@@ -544,6 +563,25 @@ export class MapApp {
         this.convert = null
         break
       case 'notice':
+        break
+      case 'stamps': {
+        this.stamps = msg.stamps
+        const missing = msg.stamps.map((st) => st.id).filter((id) => !this.stampData.has(id))
+        for (let i = 0; i < missing.length; i += 40) this.send({ type: 'getStampImages', ids: missing.slice(i, i + 40) })
+        this.syncStampBrushes()
+        if (this.panel === 'decor') this.renderSide(true)
+        break
+      }
+      case 'stampImages':
+        for (const { id, dataUrl } of msg.images) {
+          this.stampData.set(id, dataUrl)
+          const img = new Image()
+          img.onload = () => this.map.invalidate()
+          img.src = dataUrl
+          this.stampImages.set(id, img)
+        }
+        this.syncStampBrushes()
+        if (this.panel === 'decor') this.renderSide(true)
         break
     }
   }
@@ -621,6 +659,19 @@ export class MapApp {
         },
         icon('grid'),
       )),
+      (this.snapBtn = h(
+        'button',
+        {
+          class: `mt-btn${this.map.snapOn ? ' mt-on' : ''}`,
+          title: 'Snapping: shapes snap to places, shape points and whole steps. Hold Ctrl to place freely; Shift draws at 15° angles and keeps proportions.',
+          onclick: () => {
+            this.map.snapOn = !this.map.snapOn
+            this.snapBtn.classList.toggle('mt-on', this.map.snapOn)
+            this.savePrefs()
+          },
+        },
+        icon('magnet'),
+      )),
       h('button', { class: 'mt-btn', title: 'Center on me', onclick: () => this.centerOnMe() }, icon('me')),
       h('button', { class: 'mt-btn mt-side-btn', title: 'Show or hide the Layers and Properties panels', onclick: () => this.toggleSide() }, icon('side')),
     )
@@ -642,7 +693,7 @@ export class MapApp {
   /** A tool chosen on the rail or by its key. Land tools need a grid, the sampler a picture. */
   private pickTool(t: Tool): void {
     if (t !== 'pan' && t !== 'measure' && !this.profile) return this.warn('Pick or create a map first.')
-    if ((t === 'lsample' || t === 'lwand' || t === 'lcoast') && !this.profile?.image) return this.warn('Upload a map picture first (Picture layer).')
+    if ((t === 'lsample' || t === 'lwand' || t === 'lcoast' || t === 'scut') && !this.profile?.image) return this.warn('Upload a map picture first (Picture layer).')
     if (isLandTool(t)) this.ensureLand()
     this.setTool(t)
   }
@@ -761,6 +812,7 @@ export class MapApp {
   }
 
   private onRect(tool: Tool, r: Bounds): void {
+    if (tool === 'scut') return this.cutStamp(r)
     if (tool === 'zone') {
       const id = `zone-${Date.now().toString(36)}`
       const rd = (v: number) => Math.round(v)
@@ -942,6 +994,7 @@ export class MapApp {
     clear(body)
     if (d === 'chat') this.renderChatTab(body)
     else if (d === 'import') this.renderImportTab(body)
+    else if (d === 'stamp') this.renderStampEditor(body)
     else if (this.profile && d === 'canvas') this.renderCanvasTab(body)
     else if (this.profile) this.renderMapTab(body)
     else body.append(this.emptyMapNotice())
@@ -1105,6 +1158,8 @@ export class MapApp {
   private decorOptions(t: Tool): HTMLElement[] {
     const brush = brushById(this.decorBrush)
     const sel = h('select', { class: 'mt-select', title: 'Brush' })
+    const yours = yourDecorBrushes()
+    if (yours.length) sel.append(h('optgroup', { label: 'Your stamps' }, ...yours.map((b) => h('option', { value: b.id, selected: b.id === brush.id }, b.name))))
     for (const set of ['Ink', 'Painterly'] as const) {
       const grp = h('optgroup', { label: `${set} set` })
       for (const b of DECOR_BRUSHES) if (b.set === set) grp.append(h('option', { value: b.id, selected: b.id === brush.id }, b.name))
@@ -2037,6 +2092,29 @@ export class MapApp {
         h('span', { class: 'mt-lbl' }, 'Opacity'),
         opacity,
       ),
+      h(
+        'div',
+        { class: 'mt-form' },
+        h('label', null, 'Blend'),
+        (() => {
+          const sel = h('select', { class: 'mt-select', title: 'Show the picture under the map, or lay it over the terrain as a texture' })
+          for (const [v, label] of [
+            ['', 'Normal (underneath)'],
+            ['multiply', 'Texture: multiply'],
+            ['overlay', 'Texture: overlay'],
+            ['soft-light', 'Texture: soft light'],
+          ])
+            sel.append(h('option', { value: v, selected: (meta.blend ?? '') === v }, label))
+          sel.addEventListener('change', () =>
+            this.mutate((d) => {
+              if (sel.value) d.image!.blend = sel.value as NonNullable<MapImageMeta['blend']>
+              else delete d.image!.blend
+            }),
+          )
+          return sel
+        })(),
+      ),
+      meta.blend ? h('div', { class: 'mt-dim' }, 'The picture is laid over the terrain and decorations, so its paper, brushwork and shading show through the painted colours. Lower the opacity to soften it.') : '',
     )
 
     // Crop
@@ -2257,6 +2335,8 @@ export class MapApp {
     )
     const coast = h('select', { class: 'mt-select', title: 'How the shoreline is drawn' }, h('option', { value: 'soft', selected: grid.coast !== 'ink' }, 'Soft glow'), h('option', { value: 'ink', selected: grid.coast === 'ink' }, 'Inked, with water hatching'))
     coast.addEventListener('change', () => this.mutate((d) => d.land && (d.land.coast = coast.value === 'ink' ? 'ink' : undefined)))
+    const colour = h('select', { class: 'mt-select', title: 'Crisp cell edges, or climates fading softly into each other with gentle shading' }, h('option', { value: '', selected: !grid.blend }, 'Crisp cells'), h('option', { value: 'blend', selected: !!grid.blend }, 'Blended, painterly'))
+    colour.addEventListener('change', () => this.mutate((d) => d.land && (d.land.blend = colour.value === 'blend' ? true : undefined)))
     const detail = h('select', { class: 'mt-select', title: 'How many cells: more means finer painting' })
     const opts = DETAIL.some(([n]) => n === grid.cells) ? DETAIL : ([[grid.cells, 'Current'], ...DETAIL] as [number, string][])
     for (const [n, label] of opts) detail.append(h('option', { value: String(n), selected: n === grid.cells }, `${label} (~${n.toLocaleString()} cells)`))
@@ -2264,7 +2344,7 @@ export class MapApp {
     body.append(
       h('h4', null, 'Display'),
       h('div', { class: 'mt-row mt-wrap' }, h('label', { class: 'mt-check' }, symbols, 'Terrain symbols'), h('label', { class: 'mt-check', title: 'Show the map picture above the terrain, at its own opacity' }, onTop, 'Picture on top')),
-      h('div', { class: 'mt-form' }, h('label', null, 'Detail'), detail, h('label', null, 'Coast'), coast),
+      h('div', { class: 'mt-form' }, h('label', null, 'Colour'), colour, h('label', null, 'Coast'), coast, h('label', null, 'Detail'), detail),
     )
 
     body.append(this.landSeedBox(grid))
@@ -2374,6 +2454,80 @@ export class MapApp {
         )
       body.append(h('h4', null, `${set} set`), grid)
     }
+    const yours = yourDecorBrushes()
+    const grid = h('div', { class: 'mt-brushes' })
+    for (const b of yours)
+      grid.append(
+        h(
+          'button',
+          {
+            class: `mt-brush${b.id === this.decorBrush ? ' mt-on' : ''}`,
+            title: `${b.name} (${b.kinds.length} stamp${b.kinds.length === 1 ? '' : 's'})`,
+            onclick: () => {
+              this.decorBrush = b.id
+              if (this.map.tool !== 'dbrush') this.pickTool('dbrush')
+              else {
+                this.renderSide(true)
+                this.renderOptions()
+              }
+            },
+          },
+          b.preview ? h('img', { src: b.preview, alt: '' }) : h('span', { class: 'mt-dim' }, '…'),
+          h('span', null, b.name),
+        ),
+      )
+    body.append(
+      h('h4', null, 'Your stamps'),
+      h(
+        'div',
+        { class: 'mt-row mt-wrap' },
+        h('button', { class: `mt-btn${this.map.tool === 'scut' ? ' mt-on' : ''}`, disabled: !p.image, title: p.image ? 'Drag a box around something on the picture' : 'Upload a map picture first', onclick: () => this.pickTool('scut') }, icon('crop'), 'Cut from picture'),
+        h('button', { class: 'mt-btn', onclick: () => void this.importStampImage() }, icon('import'), 'Import image'),
+      ),
+      yours.length ? grid : h('div', { class: 'mt-dim' }, 'Cut mountains, trees or castles out of your map picture (or import PNGs) and paint with them like any other brush.'),
+    )
+    const current = yours.find((b) => b.id === this.decorBrush)
+    if (current) {
+      const list = h('div', { class: 'mt-list' })
+      for (const [kind] of current.kinds) {
+        const id = kind.slice(4)
+        const st = this.stamps.find((x) => x.id === id)
+        if (!st) continue
+        list.append(
+          h(
+            'div',
+            { class: 'mt-item mt-biome' },
+            this.stampData.get(id) ? h('img', { src: this.stampData.get(id), alt: '', class: 'mt-stamp-thumb' }) : h('span'),
+            h('span', { class: 'mt-item-name' }, st.name),
+            h('span', { class: 'mt-dim mt-mono' }, `${st.w}×${st.h}`),
+            h(
+              'button',
+              {
+                class: `mt-btn mt-icon-btn${this.confirmDeleteStamp === id ? ' mt-danger' : ''}`,
+                title: this.confirmDeleteStamp === id ? 'Click again to delete (placed copies disappear too)' : 'Delete stamp',
+                onclick: () => {
+                  if (this.confirmDeleteStamp !== id) {
+                    this.confirmDeleteStamp = id
+                    return this.renderSide(true)
+                  }
+                  this.confirmDeleteStamp = null
+                  this.send({ type: 'deleteStamp', id })
+                },
+              },
+              icon('close'),
+            ),
+          ),
+        )
+      }
+      body.append(h('div', { class: 'mt-dim' }, `In ${current.name}:`), list)
+    }
+    const convertible = (p.features ?? []).filter((f) => convertibleToDecor(f))
+    if (convertible.length)
+      body.append(
+        h('h4', null, 'From your Nature shapes'),
+        h('div', { class: 'mt-dim' }, `${convertible.length} mountain and hill range${convertible.length === 1 ? '' : 's'}, forest, volcanic, desert and hill areas, volcanoes and peaks can become decorations. The shapes are hidden, not deleted.`),
+        h('div', { class: 'mt-row' }, h('button', { class: 'mt-btn mt-primary', onclick: () => this.convertToDecor() }, 'Turn shapes into decorations')),
+      )
     const n = p.decor?.length ?? 0
     body.append(
       h(
@@ -2399,6 +2553,142 @@ export class MapApp {
           },
           this.confirmClearDecor ? 'Confirm clear' : 'Clear decorations',
         ),
+      ),
+    )
+  }
+
+  private convertToDecor(): void {
+    const p = this.profile
+    if (!p) return
+    const { stamps, ids } = decorFromShapes(p.features ?? [], decorUnit(p.bounds), pointInRings)
+    if (!ids.length) return
+    const hide = new Set(ids)
+    this.mutate((d) => {
+      d.decor = [...(d.decor ?? []), ...stamps]
+      d.features = (d.features ?? []).map((f) => (hide.has(f.id) ? { ...f, hidden: true, decorated: true } : f))
+    })
+    this.warn(`Turned ${ids.length} shapes into ${stamps.length.toLocaleString()} decorations. The shapes are hidden in Features.`)
+  }
+
+  /** One brush per stamp group, picking its stamps at random. */
+  private syncStampBrushes(): void {
+    const groups = new Map<string, StampAsset[]>()
+    for (const st of this.stamps) groups.set(st.group, [...(groups.get(st.group) ?? []), st])
+    const brushes: DecorBrush[] = [...groups].map(([group, list]) => ({
+      id: `grp:${group}`,
+      name: group,
+      set: 'Yours',
+      kinds: list.map((st) => [`img:${st.id}`, 1 / list.length] as [string, number]),
+      size: 6,
+      spacing: 0.75,
+      preview: this.stampData.get(list[0].id),
+    }))
+    setStampLibrary(brushes, (id) => this.stampImages.get(id))
+  }
+
+  /** A box dragged on the picture: its pixels go to the stamp editor. */
+  private cutStamp(r: Bounds): void {
+    const meta = this.profile?.image
+    if (!meta || !this.picture) return this.warn('Upload a map picture first.')
+    const a = worldToImage(meta.calib, r.minX, r.maxY)
+    const b = worldToImage(meta.calib, r.maxX, r.minY)
+    const x0 = Math.max(0, Math.floor(Math.min(a.px, b.px)))
+    const y0 = Math.max(0, Math.floor(Math.min(a.py, b.py)))
+    const x1 = Math.min(meta.width, Math.ceil(Math.max(a.px, b.px)))
+    const y1 = Math.min(meta.height, Math.ceil(Math.max(a.py, b.py)))
+    if (x1 - x0 < 4 || y1 - y0 < 4) return this.warn('Drag a bigger box around it.')
+    this.openStampEditor(sourceFrom(this.picture, x0, y0, x1 - x0, y1 - y0))
+  }
+
+  private async importStampImage(): Promise<void> {
+    const files = await this.ctx.uploads.pickFile({ accept: ['image/png', 'image/webp', 'image/gif', 'image/jpeg', '.png', '.webp', '.gif', '.jpg', '.jpeg'], maxSizeBytes: 15 * 1024 * 1024 }).catch(() => [])
+    const f = files[0]
+    if (!f) return
+    const url = URL.createObjectURL(new Blob([f.bytes as BlobPart], { type: f.mimeType }))
+    const img = new Image()
+    img.src = url
+    try {
+      await img.decode()
+    } catch {
+      return this.warn('Could not read that picture.')
+    } finally {
+      URL.revokeObjectURL(url)
+    }
+    const src = sourceFrom(img, 0, 0, img.naturalWidth, img.naturalHeight)
+    // A picture with its own transparency needs no background removal.
+    const ctx = src.getContext('2d', { willReadFrequently: true })
+    const corner = ctx?.getImageData(0, 0, 1, 1).data[3] ?? 255
+    this.openStampEditor(src, corner > 200, f.name.replace(/\.[a-z0-9]+$/i, ''))
+  }
+
+  private openStampEditor(src: HTMLCanvasElement, edges = true, name = 'Stamp'): void {
+    const groups = [...new Set(this.stamps.map((st) => st.group))]
+    const brush = brushById(this.decorBrush)
+    this.stampEdit = { src, edges, tolerance: 40, seeds: [], name, group: brush.set === 'Yours' ? brush.name : groups[0] ?? 'My stamps' }
+    if (this.map.tool === 'scut') this.setTool('pan')
+    this.openDialog('stamp')
+  }
+
+  private renderStampEditor(body: HTMLElement): void {
+    const ed = this.stampEdit
+    if (!ed) return void body.append(h('div', { class: 'mt-dim' }, 'Nothing to edit.'))
+    const result = cutOut(ed.src, { edges: ed.edges, seeds: ed.seeds, tolerance: ed.tolerance })
+    const view = h('canvas', { class: 'mt-stamp-view', title: 'Click the background to remove more of it' })
+    view.width = result.width
+    view.height = result.height
+    view.getContext('2d')?.drawImage(result, 0, 0)
+    view.addEventListener('click', (e) => {
+      const r = view.getBoundingClientRect()
+      ed.seeds.push([((e.clientX - r.left) / r.width) * ed.src.width, ((e.clientY - r.top) / r.height) * ed.src.height])
+      this.renderSide(true)
+    })
+    const edges = h('input', { type: 'checkbox', checked: ed.edges })
+    edges.addEventListener('change', () => {
+      ed.edges = edges.checked
+      this.renderSide(true)
+    })
+    const tol = h('input', { type: 'range', min: '5', max: '160', value: String(ed.tolerance), class: 'mt-grow' })
+    tol.addEventListener('change', () => {
+      ed.tolerance = Number(tol.value)
+      this.renderSide(true)
+    })
+    const name = h('input', { class: 'mt-input', value: ed.name, placeholder: 'Name' })
+    name.addEventListener('input', () => (ed.name = name.value))
+    const listId = 'mt-stamp-groups'
+    const group = h('input', { class: 'mt-input', value: ed.group, placeholder: 'Group', list: listId })
+    group.addEventListener('input', () => (ed.group = group.value))
+    const groups = h('datalist', { id: listId }, ...[...new Set(this.stamps.map((st) => st.group))].map((g) => h('option', { value: g })))
+    body.append(
+      h('div', { class: 'mt-dim' }, 'The checkered parts will be see-through. Click any background that is left to remove it too.'),
+      view,
+      h('div', { class: 'mt-row mt-wrap' }, h('label', { class: 'mt-check' }, edges, 'Remove background from the edges'), ed.seeds.length ? h('button', { class: 'mt-btn mt-ghost', onclick: () => ((ed.seeds = []), this.renderSide(true)) }, 'Undo clicks') : ''),
+      h('div', { class: 'mt-row' }, h('span', { class: 'mt-dim' }, 'Tolerance'), tol),
+      h('div', { class: 'mt-form' }, h('label', null, 'Name'), name, h('label', null, 'Group'), group),
+      groups,
+      h('div', { class: 'mt-dim' }, 'Stamps in the same group make one brush that picks between them, so cut a few variants into one group.'),
+      h(
+        'div',
+        { class: 'mt-row' },
+        h(
+          'button',
+          {
+            class: 'mt-btn mt-primary',
+            onclick: () => {
+              const out = trimmed(result)
+              if (!out) return this.warn('Nothing is left: lower the tolerance.')
+              const id = `st-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+              const groupName = ed.group.trim() || 'My stamps'
+              this.send({ type: 'saveStamp', stamp: { id, name: ed.name.trim() || 'Stamp', group: groupName, w: out.width, h: out.height }, dataUrl: out.toDataURL('image/png') })
+              this.decorBrush = `grp:${groupName}`
+              this.stampEdit = null
+              this.closeDialog()
+              this.openPanel('decor')
+              this.warn(`Saved to ${groupName}. Cut another, or paint with it (Q).`)
+            },
+          },
+          'Save stamp',
+        ),
+        h('button', { class: 'mt-btn', onclick: () => ((this.stampEdit = null), this.closeDialog()) }, 'Cancel'),
       ),
     )
   }
@@ -2795,6 +3085,8 @@ export class MapApp {
           h('button', { class: 'mt-btn mt-ghost', onclick: () => this.mutate((d) => (d.features = (d.features ?? []).map((f) => (f.hidden ? { ...f, hidden: undefined } : f)))) }, 'Show them'),
         ),
       )
+    if (fs.some((f) => convertibleToDecor(f)))
+      body.append(h('div', { class: 'mt-row' }, h('button', { class: 'mt-btn', title: 'Mountain and hill ranges, forest, volcanic, desert and hill areas, volcanoes and peaks become decoration stamps; the shapes are hidden', onclick: () => this.convertToDecor() }, 'Turn Nature shapes into decorations')))
     if (fs.some((f) => this.convertibleShape(f)))
       body.append(h('div', { class: 'mt-row' }, h('button', { class: 'mt-btn', title: 'Land, lake and terrain areas become painted terrain; the shapes are hidden', onclick: () => this.convertShapes() }, 'Paint shapes as terrain')))
 
@@ -3163,6 +3455,66 @@ export class MapApp {
     refresh()
   }
 
+  private bakeWidth = 4096
+
+  /** Bake: flatten what's visible into a picture to download or use as the map picture. */
+  private bakeBox(): HTMLElement {
+    const size = h('select', { class: 'mt-select', title: 'Width of the picture in pixels' })
+    for (const n of [2048, 4096, 8192]) size.append(h('option', { value: String(n), selected: n === this.bakeWidth }, `${n.toLocaleString()} px wide`))
+    size.addEventListener('change', () => (this.bakeWidth = Number(size.value)))
+    const bake = (mime: string, quality?: number) => {
+      const canvas = this.map.bake(this.bakeWidth)
+      if (!canvas) return null
+      return { canvas, url: canvas.toDataURL(mime, quality) }
+    }
+    return h(
+      'div',
+      null,
+      h('h4', null, 'Bake to picture'),
+      h('div', { class: 'mt-dim' }, 'Flattens the whole canvas, with the layers that are visible now, into one picture. Hide places, zones or labels first if you want a clean map.'),
+      h('div', { class: 'mt-form' }, h('label', null, 'Size'), size),
+      h(
+        'div',
+        { class: 'mt-row mt-wrap' },
+        h(
+          'button',
+          {
+            class: 'mt-btn',
+            onclick: () => {
+              const out = bake('image/png')
+              if (!out) return
+              out.canvas.toBlob((blob) => {
+                if (!blob) return this.warn('Could not make the picture.')
+                const a = h('a', { href: URL.createObjectURL(blob), download: `${slug(this.profile?.name ?? 'map')}.png` })
+                document.body.append(a)
+                a.click()
+                setTimeout(() => (URL.revokeObjectURL(a.href), a.remove()), 1000)
+              }, 'image/png')
+            },
+          },
+          icon('import'),
+          'Download PNG',
+        ),
+        h(
+          'button',
+          {
+            class: 'mt-btn',
+            title: 'Replaces the current map picture with the baked one, placed exactly over the canvas',
+            onclick: () => {
+              const p = this.profile
+              const out = bake('image/webp', 0.92)
+              if (!p || !out) return
+              this.flushSave.flush()
+              this.send({ type: 'setImage', profileId: p.id, dataUrl: out.url, width: out.canvas.width, height: out.canvas.height, mime: out.url.startsWith('data:image/webp') ? 'image/webp' : 'image/png', fit: true })
+              this.warn('Baked picture set as the map picture.')
+            },
+          },
+          'Use as map picture',
+        ),
+      ),
+    )
+  }
+
   private renderMapTab(body: HTMLElement): void {
     const p = this.profile!
     const s = this.state
@@ -3176,6 +3528,7 @@ export class MapApp {
     const isDefault = s?.settings.defaultProfileId === p.id
     body.append(h('div', { class: 'mt-form' }, h('label', null, 'Name'), name, h('label', null, '1 unit ='), h('div', { class: 'mt-row' }, unit, h('span', null, 'km'))), h('h4', null, 'Canvas size'))
     this.renderCanvasTab(body)
+    body.append(this.bakeBox())
     body.append(
       h('h4', null, 'Map'),
       h(

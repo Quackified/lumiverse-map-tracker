@@ -178,6 +178,8 @@ export const CSS = `
 .mt-brush img { width: 72px; height: 48px; object-fit: contain; }
 .mt-brush:hover { background: var(--mt-fill); }
 .mt-brush.mt-on { border-color: var(--mt-primary); box-shadow: inset 0 0 0 1px var(--mt-primary); }
+.mt-stamp-view { display: block; max-width: 100%; max-height: 260px; margin: 8px auto; cursor: crosshair; border-radius: 6px; background: repeating-conic-gradient(#d9d9d9 0 25%, #f4f4f4 0 50%) 0 0 / 16px 16px; }
+.mt-stamp-thumb { width: 22px; height: 22px; object-fit: contain; }
 .mt-brush-thumb { width: 42px; height: 28px; object-fit: contain; border-radius: 4px; background: rgba(160, 190, 110, 0.35); }
 .mt-canvas-size { display: grid; grid-template-columns: 54px minmax(0, 1fr) 30px; grid-template-rows: auto auto; gap: 6px 6px; align-items: center; margin: 10px 0 6px; }
 .mt-canvas-size > label { color: var(--mt-muted); font-size: 11.5px; }

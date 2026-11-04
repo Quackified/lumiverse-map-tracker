@@ -40,6 +40,8 @@ The layout follows image editors such as Photoshop or Affinity:
   | Decoration eraser | E | | Biome eyedropper | I |
 
   Clicking a tool always selects it; Esc returns to the hand.
+- **Snapping** (magnet in the top bar, on by default): shapes snap to nearby places and shape points (a small square marks the hit), otherwise to whole steps that suit the zoom, when moving, scaling, dragging a point or drawing. Hold **Ctrl** to place freely. **Shift** draws at 15° angles and keeps proportions when scaling from a corner; **Alt** scales from the centre.
+- **Bake to picture** (Map panel): flattens the whole canvas, with the layers visible now, into one picture 2,048, 4,096 or 8,192 pixels wide. **Download PNG**, or **Use as map picture** to replace the picture with it, placed exactly over the canvas.
 - **Options bar** (under the top bar): the active tool's settings, such as the brush's biome, size and Keep coastline, or the shape layer and type, and a one-line hint.
 - **Layers** (right): every drawn layer, top first, with visibility, lock and opacity: Places (with labels), Trail, Zones, Regions, the four Features layers (Landmarks, Nature, Topography, Outlines), Decorations, Terrain and Picture. The coordinate grid is a view toggle in the top bar. Click a layer to edit it in Properties.
 - **Properties** (right, below Layers): the content behind the chosen layer or the active tool: the places list and editor, zones, the selected shape, the biome palette and seeding, or the picture's crop and calibration.
@@ -106,7 +108,7 @@ Markdown version of the same thing:
 ## Map image
 
 - **Crop:** click **Edit crop** and drag the corner or edge handles on the map; drag inside the box to move it. The rest of the picture stays visible, dimmed.
-- **Placement:** the picture is a tracing reference, not the map. Click **Transform**, then drag inside it to move, a corner to scale (Shift keeps proportions) or an edge to squash or stretch one side. Centre, width and height can also be typed. **Fit to canvas** places the cropped picture inside the canvas keeping its proportions, **Stretch to canvas** fills it exactly, and **Centre on canvas** recentres it. Only the cropped part counts.
+- **Placement:** the picture is a tracing reference, not the map. Click **Transform**, then drag inside it to move, a corner to scale (Shift keeps proportions) or an edge to squash or stretch one side. Centre, width and height can also be typed. **Blend** lays the picture over the terrain and decorations as a texture (multiply, overlay or soft light), so its paper and brushwork show through the painted colours. **Fit to canvas** places the cropped picture inside the canvas keeping its proportions, **Stretch to canvas** fills it exactly, and **Centre on canvas** recentres it. Only the cropped part counts.
 - **Number fields:** Ctrl+drag changes the value by 1, Shift by 10, Ctrl+Shift by 100, Alt by 0.1 (Ctrl+Alt by 0.01). Whole steps snap to round numbers. The arrow keys use the same modifiers.
 - **Undo / Redo:** Ctrl+Z and Ctrl+Shift+Z (or the toolbar arrows) undo edits to points, zones, bounds, crop and pins. A drag or a scrub counts as one step.
 - **Export JSON / Import JSON** (Import) moves a map between installs. The file holds points, zones, crop and calibration but not the image. After importing, upload the image; if its size matches, the crop and calibration apply automatically.
@@ -160,6 +162,7 @@ Once places live on the map, the coordinates written into entries can point at i
   - While these tools are active the picture comes to the front, see-through, so you can see what you're clicking and what's painted.
   - Crop the picture to the map first, or its frame is read as land.
 - **Colour samples (advanced):** pick a biome, click **Pick colour**, and click the picture where it shows that biome (the picture comes to the front while picking). Add a sample for each look: the sea, each forest colour, sand, snow, rock. **Generate** gives every cell on the picture the biome of the nearest sample colour. **Tolerance** leaves colours unlike every sample (labels, ships, ink) to their neighbours; **Smoothing** clears speckle; **Min island** merges tiny islands and lakes. Crop the picture to the map itself first, or its frame becomes land; any leftovers are one Fill click away.
+- **Colour** (Terrain properties): **Crisp cells**, or **Blended, painterly**: biome colours fade into each other over a few cells, with soft light and dark grain fixed to the world.
 - **Coast** (Terrain properties): a soft shallow-water glow, or **Inked, with water hatching**: a bold black shoreline with short horizontal strokes in the water, densest against the shore.
 - **Display:** terrain symbols on or off, **Picture on top** to compare against the picture while painting, and **Detail** (Coarse ~4,000 to Ultra ~80,000 cells; changing it keeps the painting). Opacity is on the Terrain layer row. **Clear terrain** goes back to fully unpainted.
 - Hovering shows the biome under the cursor. Every stroke can be undone.
@@ -170,11 +173,13 @@ Cells and biomes are adapted from [Azgaar's Fantasy Map Generator](https://githu
 
 Mountains, forests, hills, dunes, glaciers and volcanoes, scattered with brushes on top of the terrain. Click the **Decorations** layer to see the brushes.
 
-- **Two sets:** the **Ink set** draws flat two-tone shapes with bold outlines (mountains, snowy and volcanic mountains, forest masses, lone trees, hills, cliffs, glacier shards); the **Painterly set** draws soft washes with tapered ink (hills, escarpments, rainforest canopy, woodland, conifers, dunes, sandy and snowy peaks, ice spires, volcanoes, dormant cones, dark peaks, lava fissures).
+- **Two sets:** the **Ink set** draws flat two-tone shapes with bold outlines (mountains, snowy and volcanic mountains, volcanoes pouring lava veins, dormant volcanoes, lava veins, dry fissures, forest masses, lone trees, hills, cliffs, glacier shards); the **Painterly set** draws soft washes with tapered ink (hills, escarpments, rainforest canopy, woodland, conifers, dunes, sandy and snowy peaks, ice spires, volcanoes, dormant cones, dark peaks, lava fissures).
 - **Decoration brush** (Q): drag to scatter, click to place one stamp (a single volcano, say). **Size**, **Variation** and **Density** are in the options bar. Stamps of the same brush keep their distance, so going over an area again fills gaps rather than piling up.
 - **Decoration eraser** (E): drag over stamps to remove them; **Only** limits it to the chosen brush.
 - Forest and canopy brushes draw as one mass with a single scalloped outline; everything else stands on its own and overlaps back to front.
 - Stamps live in world coordinates, so they scale with zoom. The layer row has visibility and opacity; **Clear decorations** removes them all. Every stroke can be undone.
+- **Your stamps:** **Cut from picture** and drag a box around something on the map picture (a mountain, a forest clump, a castle). The new-stamp panel removes the background from the edges inward (shading is followed, outlines stop it); click any background that's left to remove it too, and adjust **Tolerance**. Give it a name and a **group**: stamps in one group make one brush that picks between them, so cut a few variants into a group. **Import image** adds PNGs (with their own transparency) or other pictures the same way. Your stamps are shared by all your maps; placed copies are mirrored at random so repeats look less copied.
+- **Turn shapes into decorations:** mountain and hill ranges in Nature become peaks and hills along their lines; forest, jungle, conifer, volcanic, desert and hill areas are filled with matching stamps; volcano and peak spots become one stamp each. Symbol size and density carry over, and the shapes are hidden, not deleted.
 
 ## Features (vector layers)
 

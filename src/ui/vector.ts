@@ -30,7 +30,14 @@ export interface VectorHost {
   emit(next: Feature[], phase: 'move' | 'end'): void
   onSelection(ids: string[]): void
   warn(message: string): void
+  /**
+   * Snap a world point: to a nearby place or shape point, else to whole steps.
+   * Ctrl (or Cmd) held turns snapping off; `exclude` skips the shapes being edited.
+   */
+  snap(x: number, y: number, mods: { ctrlKey: boolean; metaKey: boolean }, exclude?: Set<string>): { x: number; y: number }
 }
+
+type Mods = { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }
 
 interface Colors {
   bg: string
@@ -113,6 +120,8 @@ export class VectorEditor {
     ri?: number
     vi?: number
     last?: { x: number; y: number }
+    /** The selected point nearest the press, which snaps when moving. */
+    ref?: [number, number]
   } | null = null
 
   constructor(private host: VectorHost) {}
@@ -639,9 +648,21 @@ export class VectorEditor {
 
   // ── Input ─────────────────────────────────────────────────────────────────
 
-  private worldPt(sx: number, sy: number): [number, number] {
-    const w = this.host.toWorld(sx, sy)
+  private worldPt(sx: number, sy: number, mods?: Mods, exclude?: Set<string>): [number, number] {
+    let w = this.host.toWorld(sx, sy)
+    if (mods) w = this.host.snap(w.x, w.y, mods, exclude)
     return [Math.round(w.x * 100) / 100, Math.round(w.y * 100) / 100]
+  }
+
+  /** Shift while drawing: the new point lies on a 15° line from the previous one. */
+  private constrain(pt: [number, number], mods: Mods): [number, number] {
+    const last = this.draft?.[this.draft.length - 1]
+    if (!last || !mods.shiftKey) return pt
+    const dx = pt[0] - last[0]
+    const dy = pt[1] - last[1]
+    const len = Math.hypot(dx, dy)
+    const a = Math.round(Math.atan2(dy, dx) / (Math.PI / 12)) * (Math.PI / 12)
+    return [Math.round((last[0] + Math.cos(a) * len) * 100) / 100, Math.round((last[1] + Math.sin(a) * len) * 100) / 100]
   }
 
   private replace(next: Feature[]): Feature[] {
@@ -663,7 +684,7 @@ export class VectorEditor {
     const base = { sx, sy, moved: false, world, start: [] as Feature[] }
     if (tool === 'varea' || tool === 'vline') {
       if (!this.canDraw()) return false
-      const pt = this.worldPt(sx, sy)
+      const pt = this.constrain(this.worldPt(sx, sy, e), e)
       if (!this.draft) {
         this.draft = [pt]
         this.draftFreehand = false
@@ -712,7 +733,13 @@ export class VectorEditor {
     }
     if (!this.selection.has(hit.id)) this.select([hit.id])
     const sel = this.features().filter((f) => this.selection.has(f.id))
-    this.drag = { ...base, mode: 'move', start: structuredClone(sel) }
+    let ref: [number, number] | undefined
+    let best = Infinity
+    for (const f of sel) for (const r of f.rings) for (const q of r) {
+      const dd = Math.hypot(q[0] - world.x, q[1] - world.y)
+      if (dd < best) (best = dd), (ref = [q[0], q[1]])
+    }
+    this.drag = { ...base, mode: 'move', start: structuredClone(sel), ref }
     return true
   }
 
@@ -741,14 +768,29 @@ export class VectorEditor {
       }
       return
     }
-    const dx = w.x - d.world.x
-    const dy = w.y - d.world.y
+    let dx = w.x - d.world.x
+    let dy = w.y - d.world.y
+    const ids = new Set(d.start.map((f) => f.id))
+    if (d.mode === 'move' && d.ref) {
+      // Snap the point nearest the press, and move everything by the same amount.
+      const t = this.host.snap(d.ref[0] + dx, d.ref[1] + dy, e, ids)
+      dx = t.x - d.ref[0]
+      dy = t.y - d.ref[1]
+    } else if (d.mode === 'scale') {
+      const b = d.bounds!
+      const hd = d.handle!
+      const hx = hd.includes('w') ? b.minX : hd.includes('e') ? b.maxX : null
+      const hy = hd.includes('n') ? b.maxY : hd.includes('s') ? b.minY : null
+      const t = this.host.snap((hx ?? 0) + dx, (hy ?? 0) + dy, e, ids)
+      if (hx !== null) dx = t.x - hx
+      if (hy !== null) dy = t.y - hy
+    }
     let moved: Feature[] = []
     if (d.mode === 'move') {
       moved = d.start.map((f) => ({ ...f, rings: f.rings.map((r) => r.map(([x, y]) => [x + dx, y + dy] as [number, number])) }))
     } else if (d.mode === 'vertex') {
       const f = structuredClone(d.start[0])
-      f.rings[d.ri!][d.vi!] = this.worldPt(sx, sy)
+      f.rings[d.ri!][d.vi!] = this.worldPt(sx, sy, e, ids)
       moved = [f]
     } else if (d.mode === 'scale') {
       const b = d.bounds!

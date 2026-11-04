@@ -12,6 +12,8 @@ type DrawFn = (g: CanvasRenderingContext2D, x: number, y: number, size: number, 
 
 interface Kind {
   draw?: DrawFn
+  /** Lies flat on the ground: drawn before anything that stands up. */
+  flat?: boolean
   /** Drawn together with every other stamp of the kind, as one canopy. */
   mass?: (g: CanvasRenderingContext2D, crowns: [number, number, number, number][]) => void
 }
@@ -30,17 +32,16 @@ const KINDS: Record<string, Kind> = {
   // Ink set: flat two-tone fills and bold outlines.
   'ink-peak': { draw: (g, x, y, s, r) => void G.inkPeak(g, x, y, s, r, GREY) },
   'ink-snowpeak': { draw: (g, x, y, s, r) => void G.inkPeak(g, x, y, s, r, SNOW) },
-  'ink-volcpeak': {
-    draw: (g, x, y, s, r) => {
-      const top = G.inkPeak(g, x, y, s, r, ASH)
-      if (r() < 0.3) G.lavaCap(g, top, s, r)
-    },
-  },
+  'ink-volcpeak': { draw: (g, x, y, s, r) => void G.inkPeak(g, x, y, s, r, ASH) },
+  'ink-volcano': { draw: (g, x, y, s, r) => G.inkVolcano(g, x, y, s, r, true) },
+  'ink-dormant': { draw: (g, x, y, s, r) => G.inkVolcano(g, x, y, s, r, false) },
+  'ink-lava': { flat: true, draw: (g, x, y, s, r) => G.inkLava(g, x, y, s, r) },
+  'ink-fissure': { flat: true, draw: (g, x, y, s, r) => G.inkFissure(g, x, y, s, r) },
   'ink-forest': { mass: (g, crowns) => G.inkForest(g, crowns, Math.random, INK_GREEN) },
   'ink-tree': { draw: (g, x, y, s, r) => G.lollipop(g, x, y, s, r, INK_GREEN) },
   'ink-deadtree': { draw: (g, x, y, s, r) => G.deadTree(g, x, y, s, r) },
   'ink-hill': { draw: (g, x, y, s, r) => G.inkHill(g, x, y, s, r, TAN) },
-  'ink-cliff': { draw: (g, x, y, s, r) => G.inkCliff(g, x, y, s, r) },
+  'ink-cliff': { flat: true, draw: (g, x, y, s, r) => G.inkCliff(g, x, y, s, r) },
   'ink-shard': { draw: (g, x, y, s, r) => G.shard(g, x, y, s * 0.28, s * (0.7 + r() * 0.9), (r() - 0.5) * 1.1, r) },
   // Painterly set: soft washes and tapered ink.
   'pt-hill': { draw: (g, x, y, s, r) => G.hill(g, x, y, s, r, GRASS) },
@@ -55,13 +56,15 @@ const KINDS: Record<string, Kind> = {
   'pt-volcano': { draw: (g, x, y, s, r) => G.cone(g, x, y, s, r, true) },
   'pt-cone': { draw: (g, x, y, s, r) => G.cone(g, x, y, s, r, false) },
   'pt-darkpeak': { draw: (g, x, y, s, r) => G.darkPeak(g, x, y, s, r) },
-  'pt-fissure': { draw: (g, x, y, s, r) => G.fissure(g, x, y, s, r) },
+  'pt-fissure': { flat: true, draw: (g, x, y, s, r) => G.fissure(g, x, y, s, r) },
 }
 
 export interface DecorBrush {
   id: string
   name: string
-  set: 'Ink' | 'Painterly'
+  set: 'Ink' | 'Painterly' | 'Yours'
+  /** Thumbnail for the brush list (picture stamps use their own image). */
+  preview?: string
   /** Kinds this brush lays down, with their share. */
   kinds: [string, number][]
   /** Stamp size in canvas units (a hundredth of the canvas width). */
@@ -73,7 +76,11 @@ export interface DecorBrush {
 export const DECOR_BRUSHES: DecorBrush[] = [
   { id: 'ink-mountains', name: 'Mountains', set: 'Ink', kinds: [['ink-peak', 1]], size: 5.8, spacing: 0.55 },
   { id: 'ink-snow', name: 'Snowy mountains', set: 'Ink', kinds: [['ink-snowpeak', 1]], size: 5.8, spacing: 0.55 },
-  { id: 'ink-volcanic', name: 'Volcanic mountains', set: 'Ink', kinds: [['ink-volcpeak', 1]], size: 5.8, spacing: 0.55 },
+  { id: 'ink-volcanic', name: 'Volcanic mountains', set: 'Ink', kinds: [['ink-volcpeak', 0.88], ['ink-dormant', 0.12]], size: 5.8, spacing: 0.55 },
+  { id: 'ink-volcano', name: 'Volcano', set: 'Ink', kinds: [['ink-volcano', 1]], size: 11, spacing: 1.4 },
+  { id: 'ink-dormant', name: 'Dormant volcano', set: 'Ink', kinds: [['ink-dormant', 1]], size: 7, spacing: 1.1 },
+  { id: 'ink-lava', name: 'Lava veins', set: 'Ink', kinds: [['ink-lava', 1]], size: 9, spacing: 0.75 },
+  { id: 'ink-fissures', name: 'Fissures', set: 'Ink', kinds: [['ink-fissure', 1]], size: 8, spacing: 0.75 },
   { id: 'ink-forest', name: 'Forest', set: 'Ink', kinds: [['ink-forest', 1]], size: 1.1, spacing: 1 },
   { id: 'ink-trees', name: 'Lone trees', set: 'Ink', kinds: [['ink-tree', 0.88], ['ink-deadtree', 0.12]], size: 1.8, spacing: 1.5 },
   { id: 'ink-hills', name: 'Hills', set: 'Ink', kinds: [['ink-hill', 1]], size: 4, spacing: 0.8 },
@@ -94,7 +101,31 @@ export const DECOR_BRUSHES: DecorBrush[] = [
   { id: 'pt-fissures', name: 'Lava fissures', set: 'Painterly', kinds: [['pt-fissure', 1]], size: 10, spacing: 1.2 },
 ]
 
-export const brushById = (id: string): DecorBrush => DECOR_BRUSHES.find((b) => b.id === id) ?? DECOR_BRUSHES[0]
+// The user's picture stamps: brushes made from their groups, and the loaded images.
+let yourBrushes: DecorBrush[] = []
+let stampImage: (id: string) => HTMLImageElement | undefined = () => undefined
+
+/** Brushes from the user's stamp groups, and where to find each stamp's image once loaded. */
+export function setStampLibrary(brushes: DecorBrush[], lookup: (id: string) => HTMLImageElement | undefined): void {
+  yourBrushes = brushes
+  stampImage = lookup
+}
+
+export const yourDecorBrushes = (): DecorBrush[] => yourBrushes
+
+export const brushById = (id: string): DecorBrush => yourBrushes.find((b) => b.id === id) ?? DECOR_BRUSHES.find((b) => b.id === id) ?? DECOR_BRUSHES[0]
+
+/** A picture stamp, standing on its base; every other one is mirrored so repeats look less copied. */
+function drawPicture(g: CanvasRenderingContext2D, id: string, x: number, y: number, s: number, rnd: Rnd): void {
+  const img = stampImage(id)
+  if (!img || !img.complete || !img.naturalWidth) return
+  const h = (s * img.naturalHeight) / img.naturalWidth
+  g.save()
+  g.translate(x, y)
+  if (rnd() < 0.5) g.scale(-1, 1)
+  g.drawImage(img, -s / 2, -h, s, h)
+  g.restore()
+}
 
 /** World units per canvas unit: a hundredth of the canvas width. */
 export function decorUnit(b: Bounds): number {
@@ -184,6 +215,13 @@ export function eraseStamps(list: DecorStamp[], cx: number, cy: number, radius: 
   return list.filter((s) => (kinds && !kinds.has(s.t)) || Math.hypot(s.x - cx, s.y - cy) > radius)
 }
 
+const pictureKinds = new Map<string, Kind>()
+function pictureKind(id: string): Kind {
+  let k = pictureKinds.get(id)
+  if (!k) pictureKinds.set(id, (k = { draw: (g, x, y, s, r) => drawPicture(g, id, x, y, s, r) }))
+  return k
+}
+
 export class DecorRenderer {
   draw(g: CanvasRenderingContext2D, stamps: DecorStamp[], p: Painter, viewW: number, viewH: number, opacity = 1): void {
     if (!stamps.length) return
@@ -197,7 +235,7 @@ export class DecorRenderer {
     const masses = new Map<string, [number, number, number, number][]>()
     const items: { x: number; y: number; s: number; st: DecorStamp; kind: Kind }[] = []
     for (const st of stamps) {
-      const kind = KINDS[st.t]
+      const kind = st.t.startsWith('img:') ? pictureKind(st.t.slice(4)) : KINDS[st.t]
       if (!kind) continue
       const m = st.s * 1.5
       if (st.x < minX - m || st.x > maxX + m || st.y < minY - m || st.y > maxY + m) continue
@@ -215,7 +253,7 @@ export class DecorRenderer {
     g.globalAlpha *= opacity
     // Canopies sit on the ground; everything else stands on top, back to front.
     for (const [t, crowns] of masses) KINDS[t].mass!(g, crowns)
-    items.sort((a, b) => a.y - b.y)
+    items.sort((a, b) => (a.kind.flat === b.kind.flat ? a.y - b.y : a.kind.flat ? -1 : 1))
     for (const it of items) it.kind.draw!(g, it.x, it.y, it.s, G.mulberry(it.st.r))
     g.restore()
   }
@@ -224,6 +262,7 @@ export class DecorRenderer {
 /** A small picture of what a brush lays down, for the brush list. */
 const previews = new Map<string, string>()
 export function brushPreview(brush: DecorBrush): string {
+  if (brush.preview) return brush.preview
   const cached = previews.get(brush.id)
   if (cached) return cached
   const c = document.createElement('canvas')
@@ -248,4 +287,87 @@ export function brushPreview(brush: DecorBrush): string {
   const url = c.toDataURL()
   previews.set(brush.id, url)
   return url
+}
+
+/** What each Nature shape becomes as decorations: a kind, its size in canvas units, and spacing. */
+const FROM_SHAPE: Record<string, { kind: string; size: number; spacing: number }> = {
+  'line:mountains': { kind: 'ink-peak', size: 5.8, spacing: 0.5 },
+  'line:hills': { kind: 'ink-hill', size: 4, spacing: 0.7 },
+  'area:forest': { kind: 'ink-forest', size: 1.1, spacing: 0.9 },
+  'area:jungle': { kind: 'pt-canopy', size: 1.6, spacing: 0.8 },
+  'area:pine': { kind: 'pt-conifer', size: 3, spacing: 0.9 },
+  'area:hills': { kind: 'ink-hill', size: 4, spacing: 0.9 },
+  'area:volcanic': { kind: 'ink-volcpeak', size: 5.8, spacing: 0.7 },
+  'area:desert': { kind: 'pt-dune', size: 8, spacing: 1.1 },
+  'spot:volcano': { kind: 'ink-volcano', size: 11, spacing: 1 },
+  'spot:peak': { kind: 'ink-peak', size: 7, spacing: 1 },
+}
+
+/** A Nature shape that becomes decorations; hidden ones count too (painted as terrain first, say). */
+export const convertibleToDecor = (f: { geom: string; type: string; layer: string; decorated?: boolean }): boolean =>
+  !f.decorated && f.layer === 'terrain' && `${f.geom}:${f.type}` in FROM_SHAPE
+
+/**
+ * Nature shapes as decorations: ranges become stamps along their line, areas
+ * are filled on a jittered grid, spots become one stamp. Symbol size and
+ * density on the shape carry over.
+ */
+export function decorFromShapes(
+  shapes: { id: string; geom: string; type: string; layer: string; rings: [number, number][][]; size?: number; density?: number; decorated?: boolean }[],
+  unit: number,
+  inside: (x: number, y: number, rings: [number, number][][]) => boolean,
+  rnd: Rnd = Math.random,
+): { stamps: DecorStamp[]; ids: string[] } {
+  const stamps: DecorStamp[] = []
+  const ids: string[] = []
+  const stamp = (t: string, x: number, y: number, s: number) =>
+    stamps.push({ t, x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100, s: Math.round(s * (0.75 + rnd() * 0.5) * 100) / 100, r: Math.floor(rnd() * 2 ** 31) })
+  for (const f of shapes) {
+    const how = FROM_SHAPE[`${f.geom}:${f.type}`]
+    if (!how || !convertibleToDecor(f)) continue
+    ids.push(f.id)
+    const size = how.size * unit * (f.size ?? 1)
+    const gap = (how.spacing * size) / Math.sqrt(f.density ?? 1)
+    if (f.geom === 'spot') {
+      const [x, y] = f.rings[0][0]
+      stamp(how.kind, x, y, size)
+    } else if (f.geom === 'line') {
+      // Walk the line, a stamp every gap, jittered a little to either side.
+      const r = f.rings[0]
+      let carry = 0
+      for (let i = 1; i < r.length; i++) {
+        const [ax, ay] = r[i - 1]
+        const [bx, by] = r[i]
+        const len = Math.hypot(bx - ax, by - ay)
+        let t = carry
+        while (t < len) {
+          const k = t / len
+          const nx = -(by - ay) / (len || 1)
+          const ny = (bx - ax) / (len || 1)
+          const side = (rnd() - 0.5) * gap * 1.2
+          stamp(how.kind, ax + (bx - ax) * k + nx * side, ay + (by - ay) * k + ny * side, size)
+          t += gap * (0.7 + rnd() * 0.6)
+        }
+        carry = t - len
+      }
+    } else {
+      let minX = Infinity
+      let minY = Infinity
+      let maxX = -Infinity
+      let maxY = -Infinity
+      for (const [x, y] of f.rings[0]) {
+        if (x < minX) minX = x
+        if (x > maxX) maxX = x
+        if (y < minY) minY = y
+        if (y > maxY) maxY = y
+      }
+      for (let y = minY; y <= maxY; y += gap * 0.87)
+        for (let x = minX; x <= maxX; x += gap) {
+          const px = x + (rnd() - 0.5) * gap * 0.9
+          const py = y + (rnd() - 0.5) * gap * 0.9
+          if (inside(px, py, f.rings)) stamp(how.kind, px, py, size)
+        }
+    }
+  }
+  return { stamps, ids }
 }

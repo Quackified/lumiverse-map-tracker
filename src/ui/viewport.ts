@@ -23,10 +23,10 @@ export type LandTool = 'lbrush' | 'lfill' | 'llasso' | 'lpick' | 'lsample' | 'lw
 const LAND_TOOLS = new Set<string>(['lbrush', 'lfill', 'llasso', 'lpick', 'lsample', 'lwand', 'lcoast'])
 export const isLandTool = (t: string): t is LandTool => LAND_TOOLS.has(t)
 /** Tools that read the picture: it comes to the front while they're active. */
-const PICTURE_TOOLS = new Set<string>(['lsample', 'lwand', 'lcoast'])
+const PICTURE_TOOLS = new Set<string>(['lsample', 'lwand', 'lcoast', 'scut'])
 export type DecorTool = 'dbrush' | 'derase'
 export const isDecorTool = (t: string): t is DecorTool => t === 'dbrush' || t === 'derase'
-export type Tool = 'pan' | 'me' | 'dest' | 'add' | 'measure' | 'crop' | 'zone' | 'imgxf' | 'pmove' | VectorTool | LandTool | DecorTool
+export type Tool = 'pan' | 'me' | 'dest' | 'add' | 'measure' | 'crop' | 'zone' | 'imgxf' | 'pmove' | 'scut' | VectorTool | LandTool | DecorTool
 type CropMode = 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
 
 const CROP_CURSOR: Record<CropMode, string> = {
@@ -145,6 +145,10 @@ export class MapView {
   /** Draw the map picture above the land grid (for comparing while painting or seeding). */
   imageOnTop = false
   landOpacity = 1
+  /** Snapping for shapes: to nearby places and shape points, else to whole steps. Ctrl turns it off. */
+  snapOn = true
+  /** Where the last snap landed on a place or shape point, to mark it. */
+  private snapMark: { x: number; y: number } | null = null
   /** Outline being drawn with the terrain lasso, in world coordinates. */
   private lasso: [number, number][] | null = null
 
@@ -208,6 +212,7 @@ export class MapView {
       emit: (next, phase) => this.hooks.onFeaturesEdit(next, phase),
       onSelection: (ids) => this.hooks.onFeatureSelection(ids),
       warn: (m) => this.hooks.warn(m),
+      snap: (x, y, mods, exclude) => this.snapWorld(x, y, mods, exclude),
     })
     this.painter = {
       toScreen: (x, y) => this.toScreen(x, y),
@@ -217,6 +222,35 @@ export class MapView {
     this.ro = new ResizeObserver(() => this.resize())
     this.ro.observe(this.el)
     this.bind()
+  }
+
+  snapWorld(x: number, y: number, mods: { ctrlKey: boolean; metaKey: boolean }, exclude?: Set<string>): { x: number; y: number } {
+    this.snapMark = null
+    if (!this.snapOn || mods.ctrlKey || mods.metaKey || !this.profile) return { x, y }
+    // Objects first: a place or a shape point within 9 pixels.
+    const r = 9 / this.view.s
+    let best = r
+    let hit: { x: number; y: number } | null = null
+    for (const pt of this.profile.points) {
+      const d = Math.hypot(pt.x - x, pt.y - y)
+      if (d < best) (best = d), (hit = { x: pt.x, y: pt.y })
+    }
+    for (const f of this.profile.features ?? []) {
+      if (f.hidden || exclude?.has(f.id) || !layerSettings(this.profile.layerSettings, f.layer).visible) continue
+      for (const ring of f.rings)
+        for (const [qx, qy] of ring) {
+          if (Math.abs(qx - x) > best || Math.abs(qy - y) > best) continue
+          const d = Math.hypot(qx - x, qy - y)
+          if (d < best) (best = d), (hit = { x: qx, y: qy })
+        }
+    }
+    if (hit) {
+      this.snapMark = hit
+      return hit
+    }
+    // Otherwise whole steps that suit the zoom: whole units close in, tens further out.
+    const step = Math.max(0.1, niceStep(12 / this.view.s))
+    return { x: Math.round(x / step) * step, y: Math.round(y / step) * step }
   }
 
   destroy(): void {
@@ -555,7 +589,7 @@ export class MapView {
         this.gesture = { ...base, mode: 'vector' }
         return
       }
-      const rectTool = this.tool === 'zone'
+      const rectTool = this.tool === 'zone' || this.tool === 'scut'
       const w = this.toWorld(p.x, p.y)
       if (rectTool) this.dragRect = { a: w, b: w }
       this.gesture = { ...base, mode: rectTool ? 'rect' : 'pan' }
@@ -933,14 +967,52 @@ export class MapView {
     return this.theme
   }
 
+  /** Set while drawing a bake: no background, rulers or tool overlays. */
+  private baking = false
+
+  /**
+   * Bake: draw the whole canvas into a new picture `width` pixels wide, with
+   * the layers that are visible now and none of the tools' overlays.
+   */
+  bake(width: number): HTMLCanvasElement | null {
+    const p = this.profile
+    if (!p) return null
+    const b = p.bounds
+    const height = Math.max(1, Math.round((width * (b.maxY - b.minY)) / (b.maxX - b.minX)))
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    const saved = { g: this.g, w: this.w, hgt: this.hgt, dpr: this.dpr, view: { ...this.view }, hover: this.hover, gesture: this.gesture }
+    this.g = ctx
+    this.w = width
+    this.hgt = height
+    this.dpr = 1
+    this.view = { cx: (b.minX + b.maxX) / 2, cy: (b.minY + b.maxY) / 2, s: width / (b.maxX - b.minX) }
+    this.hover = null
+    this.gesture = null
+    this.baking = true
+    try {
+      this.draw()
+    } finally {
+      Object.assign(this, saved)
+      this.baking = false
+      this.invalidate()
+    }
+    return canvas
+  }
+
   private draw(): void {
     if (!this.w) return
     const g = this.g
     const t = this.readTheme()
     g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
     g.clearRect(0, 0, this.w, this.hgt)
-    g.fillStyle = t.bg
-    g.fillRect(0, 0, this.w, this.hgt)
+    if (!this.baking) {
+      g.fillStyle = t.bg
+      g.fillRect(0, 0, this.w, this.hgt)
+    }
 
     const p = this.profile
     const o = this.toWorld(0, 0)
@@ -953,7 +1025,8 @@ export class MapView {
       // The picture sits under the vector layers, except while it's being cropped
       // or transformed, when it comes to the front so it can be lined up.
       // Picking colour samples needs the picture in view, so it comes to the front then.
-      const picOnTop = this.imageOnTop || PICTURE_TOOLS.has(this.tool)
+      // A blended picture is a texture laid over the terrain, so it goes above it.
+      const picOnTop = this.imageOnTop || PICTURE_TOOLS.has(this.tool) || !!p.image?.blend
       if (this.imageVisible() && !editingImage && !picOnTop) this.drawImage(false)
       if (p.land && this.layers.land) this.land.draw(this.g, p.land, this.painter, this.w, this.hgt, this.landOpacity)
       if (p.decor?.length && this.layers.decor) this.decor.draw(this.g, p.decor, this.painter, this.w, this.hgt, this.decorOpacity)
@@ -972,6 +1045,12 @@ export class MapView {
         this.drawDragRect(t)
       }
       this.vec.drawOverlay(this.g, colors, this.tool)
+      if (this.snapMark && this.gesture?.mode === 'vector') {
+        const m = this.toScreen(this.snapMark.x, this.snapMark.y)
+        g.strokeStyle = t.accent
+        g.lineWidth = 2
+        g.strokeRect(m.x - 5, m.y - 5, 10, 10)
+      }
       if (this.lasso && this.lasso.length > 1) {
         g.beginPath()
         this.lasso.forEach(([x, y], i) => {
@@ -999,7 +1078,7 @@ export class MapView {
       }
       if (editingImage) this.drawCropEditor(t, !cropping)
     }
-    this.drawRulers(step, t)
+    if (!this.baking) this.drawRulers(step, t)
   }
 
   private screenRect(px: number, py: number, pw: number, ph: number): { x: number; y: number; w: number; h: number } {
@@ -1020,6 +1099,7 @@ export class MapView {
     g.globalAlpha = this.editingImage() || this.tool === 'lsample' ? Math.max(meta.opacity, 0.85) : PICTURE_TOOLS.has(this.tool) ? Math.min(Math.max(meta.opacity, 0.5), 0.6) : meta.opacity
     g.imageSmoothingEnabled = true
     g.imageSmoothingQuality = 'high'
+    if (meta.blend && !full && !this.editingImage() && !PICTURE_TOOLS.has(this.tool)) g.globalCompositeOperation = meta.blend
     g.drawImage(img, c.x, c.y, c.w, c.h, r.x, r.y, r.w, r.h)
     g.restore()
   }

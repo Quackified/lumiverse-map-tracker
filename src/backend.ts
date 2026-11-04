@@ -11,6 +11,7 @@ import {
   type LorebookBackupSummary,
   type ProfileSummary,
   type Settings,
+  type StampAsset,
   type TrailPoint,
   type WorldProfile,
 } from './shared/types'
@@ -78,6 +79,15 @@ async function readJson<T>(path: string, fallback: T, userId?: string): Promise<
 
 async function writeJson(path: string, value: unknown, userId?: string): Promise<void> {
   await spindle.userStorage.write(path, JSON.stringify(value), userId)
+}
+
+// Picture stamps: one library per user, shared by every map.
+const STAMP_INDEX = 'stamps/index.json'
+const STAMP_ID = /^[A-Za-z0-9_-]{1,64}$/
+const stampPath = (id: string) => `stamps/${id}.txt`
+
+async function sendStamps(userId?: string): Promise<void> {
+  send({ type: 'stamps', stamps: await readJson<StampAsset[]>(STAMP_INDEX, [], userId) }, userId)
 }
 
 async function loadSettings(userId?: string): Promise<StoredSettings> {
@@ -370,7 +380,7 @@ async function handle(msg: FrontendMessage, userId?: string): Promise<void> {
       if (!profile) return
       await spindle.userStorage.write(imagePath(profile.id), msg.dataUrl, userId)
       const prev = profile.image ?? profile.imageTemplate
-      const sameSize = prev && prev.width === msg.width && prev.height === msg.height
+      const sameSize = !msg.fit && prev && prev.width === msg.width && prev.height === msg.height
       delete profile.imageTemplate
       profile.image = {
         width: msg.width,
@@ -475,6 +485,35 @@ async function handle(msg: FrontendMessage, userId?: string): Promise<void> {
     }
     case 'listLorebookBackups':
       return sendBackups(userId)
+    case 'listStamps':
+      return sendStamps(userId)
+    case 'getStampImages': {
+      const images: { id: string; dataUrl: string }[] = []
+      for (const id of msg.ids.slice(0, 80)) {
+        if (!STAMP_ID.test(id)) continue
+        try {
+          if (await spindle.userStorage.exists(stampPath(id), userId)) images.push({ id, dataUrl: await spindle.userStorage.read(stampPath(id), userId) })
+        } catch {
+          /* a missing image just isn't sent */
+        }
+      }
+      return send({ type: 'stampImages', images }, userId)
+    }
+    case 'saveStamp': {
+      const st = msg.stamp
+      if (!STAMP_ID.test(st.id) || !msg.dataUrl.startsWith('data:image/') || msg.dataUrl.length > 4_000_000) return notice('error', 'That stamp could not be saved.', userId)
+      await spindle.userStorage.write(stampPath(st.id), msg.dataUrl, userId)
+      const index = (await readJson<StampAsset[]>(STAMP_INDEX, [], userId)).filter((s) => s.id !== st.id)
+      index.push({ id: st.id, name: String(st.name || 'Stamp').slice(0, 60), group: String(st.group || 'My stamps').slice(0, 60), w: Math.max(1, Math.round(st.w)), h: Math.max(1, Math.round(st.h)) })
+      await writeJson(STAMP_INDEX, index, userId)
+      return sendStamps(userId)
+    }
+    case 'deleteStamp': {
+      if (!STAMP_ID.test(msg.id)) return
+      await spindle.userStorage.delete(stampPath(msg.id), userId).catch(() => {})
+      await writeJson(STAMP_INDEX, (await readJson<StampAsset[]>(STAMP_INDEX, [], userId)).filter((s) => s.id !== msg.id), userId)
+      return sendStamps(userId)
+    }
     case 'restoreLorebookBackup': {
       if (!spindle.permissions.has('world_books')) return
       const backup = await readJson<LorebookBackup | null>(backupPath(msg.backupId), null, userId)

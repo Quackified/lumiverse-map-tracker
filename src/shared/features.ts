@@ -165,6 +165,7 @@ export function cleanFeature(raw: unknown): Feature | null {
   for (const k of ['elevation', 'size', 'density'] as const) if (typeof f[k] === 'number' && Number.isFinite(f[k])) out[k] = f[k] as number
   if (f.smooth) out.smooth = true
   if (f.hidden) out.hidden = true
+  if (f.decorated) out.decorated = true
   return out
 }
 

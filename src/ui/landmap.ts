@@ -94,6 +94,92 @@ export class LandRenderer {
     return this.built
   }
 
+  private blendCanvas: HTMLCanvasElement | null = null
+  private grain: CanvasPattern | null = null
+
+  /**
+   * Blended colour: the biomes painted off screen, spilling a little past their
+   * edges, then blurred over a few cells and clipped to the coast, so climates
+   * fade into each other. A soft, world-anchored grain adds light and shade.
+   */
+  private drawBlended(g: CanvasRenderingContext2D, built: Built, grid: LandGrid, base: DOMMatrix, s: number, o: { x: number; y: number }): void {
+    const cw = g.canvas.width
+    const ch = g.canvas.height
+    const bc = (this.blendCanvas ??= document.createElement('canvas'))
+    if (bc.width !== cw || bc.height !== ch) (bc.width = cw), (bc.height = ch)
+    const b = bc.getContext('2d')
+    if (!b) return
+    b.setTransform(1, 0, 0, 1, 0, 0)
+    b.clearRect(0, 0, cw, ch)
+    b.setTransform(base)
+    b.translate(o.x, o.y)
+    b.scale(s, -s)
+    b.lineJoin = 'round'
+    for (const [width, alpha] of [
+      [built.cell * 3, 1],
+      [built.cell * 0.9, 1],
+    ]) {
+      b.lineWidth = width
+      b.globalAlpha = alpha
+      for (const r of built.regions) {
+        const col = biomeColor(r.biome, grid)
+        b.fillStyle = col
+        b.strokeStyle = col
+        b.stroke(r.path)
+        b.fill(r.path, 'evenodd')
+      }
+    }
+    const blur = Math.max(2, Math.min(28, built.cell * s * 1.4 * base.a))
+    g.save()
+    g.clip(built.coast, 'evenodd')
+    g.save()
+    g.setTransform(1, 0, 0, 1, 0, 0)
+    g.filter = `blur(${blur.toFixed(1)}px)`
+    g.drawImage(bc, 0, 0)
+    g.filter = 'none'
+    g.restore()
+    // Grain: soft light and dark patches, fixed to the world.
+    if (!this.grain) {
+      const n = document.createElement('canvas')
+      n.width = n.height = 128
+      const nc = n.getContext('2d')
+      if (nc) {
+        const img = nc.createImageData(128, 128)
+        // Smooth value noise on a 16-cell lattice, wrapped so the tile repeats seamlessly.
+        const L = 16
+        const lat: number[] = []
+        for (let i = 0; i < L * L; i++) lat.push(Math.random())
+        const at = (x: number, y: number) => lat[((y % L) + L) % L * L + (((x % L) + L) % L)]
+        const sm = (t: number) => t * t * (3 - 2 * t)
+        for (let y = 0; y < 128; y++)
+          for (let x = 0; x < 128; x++) {
+            const fx = (x / 128) * L
+            const fy = (y / 128) * L
+            const xi = Math.floor(fx)
+            const yi = Math.floor(fy)
+            const tx = sm(fx - xi)
+            const ty = sm(fy - yi)
+            const v = at(xi, yi) * (1 - tx) * (1 - ty) + at(xi + 1, yi) * tx * (1 - ty) + at(xi, yi + 1) * (1 - tx) * ty + at(xi + 1, yi + 1) * tx * ty
+            const k = (y * 128 + x) * 4
+            const c = Math.round(80 + v * 96)
+            img.data[k] = img.data[k + 1] = img.data[k + 2] = c
+            img.data[k + 3] = 255
+          }
+        nc.putImageData(img, 0, 0)
+        this.grain = g.createPattern(n, 'repeat')
+      }
+    }
+    if (this.grain) {
+      const tileWorld = built.cell * 60
+      this.grain.setTransform(new DOMMatrix().translate(0, 0).scale(tileWorld / 128, -tileWorld / 128))
+      g.globalCompositeOperation = 'soft-light'
+      g.globalAlpha *= 0.55
+      g.fillStyle = this.grain
+      g.fill(built.coast, 'evenodd')
+    }
+    g.restore()
+  }
+
   private hatchCanvas: HTMLCanvasElement | null = null
   private bandCanvas: HTMLCanvasElement | null = null
 
@@ -217,17 +303,20 @@ export class LandRenderer {
       g.restore()
     }
     // Biomes, each stroked in its own colour too so smoothed neighbours leave no seams.
-    g.save()
-    g.clip(built.coast, 'evenodd')
-    g.lineWidth = built.cell * 0.9
-    for (const r of built.regions) {
-      const col = biomeColor(r.biome, grid)
-      g.fillStyle = col
-      g.strokeStyle = col
-      g.fill(r.path, 'evenodd')
-      g.stroke(r.path)
+    if (grid.blend) this.drawBlended(g, built, grid, base, s, o)
+    else {
+      g.save()
+      g.clip(built.coast, 'evenodd')
+      g.lineWidth = built.cell * 0.9
+      for (const r of built.regions) {
+        const col = biomeColor(r.biome, grid)
+        g.fillStyle = col
+        g.strokeStyle = col
+        g.fill(r.path, 'evenodd')
+        g.stroke(r.path)
+      }
+      g.restore()
     }
-    g.restore()
     if (built.lakes) {
       g.fillStyle = biomeColor(LAKE, grid)
       g.fill(built.lakes, 'evenodd')

@@ -12,12 +12,12 @@ import {
   worldToImage,
   zoneRect,
 } from '../shared/geo'
-import type { Bounds, Calibration, ChatMapState, Feature, MapImageMeta, Poi, Rect, WorldProfile, Zone } from '../shared/types'
+import type { Bounds, Calibration, ChatMapState, DecorStamp, LandGrid, Feature, MapImageMeta, Poi, Rect, WorldProfile, Zone } from '../shared/types'
 import { clear, h, hueOf } from './dom'
 import { VectorEditor, isVectorTool, type VectorTool } from './vector'
 import { LandRenderer } from './landmap'
 import { DecorRenderer } from './decor'
-import { biomeName } from '../shared/cells'
+import { EMPTY, biomeColor, biomeName, graphFor } from '../shared/cells'
 
 export type LandTool = 'lbrush' | 'lfill' | 'llasso' | 'lpick' | 'lsample' | 'lwand' | 'lcoast'
 const LAND_TOOLS = new Set<string>(['lbrush', 'lfill', 'llasso', 'lpick', 'lsample', 'lwand', 'lcoast'])
@@ -183,6 +183,31 @@ export class MapView {
   readonly vec: VectorEditor
   private painter: import('./terrain').Painter
   private raf = 0
+  /**
+   * Terrain and decorations drawn once into their own canvases (with a margin
+   * around the view), then reused: hovering, places, labels and tool overlays
+   * redraw over it without repainting thousands of cells and stamps. While the
+   * view moves the cached picture is shifted and scaled; it is redrawn sharp
+   * once the view settles, or when the terrain or decorations change.
+   */
+  private base: { land: HTMLCanvasElement; decor: HTMLCanvasElement; view: View; margin: number; landKey: unknown[]; decorKey: unknown[] } | null = null
+  /** World areas an eraser stroke changed since the last frame. */
+  private eraseAreas: Bounds[] = []
+  private baseDirty = true
+  /** When the view last moved, to tell a moving view from a settled one. */
+  private movedAt = 0
+  private drawnView: View | null = null
+  private settleTimer = 0
+  /**
+   * A brush stroke not saved yet: its cells or stamps are painted straight
+   * into the cached picture as they come, and the stroke is saved once when
+   * the pointer is released (then the cache is redrawn properly).
+   */
+  private strokeCells: { grid: LandGrid; biome: number; cells: number[] } | null = null
+  private strokeStamps: DecorStamp[] | null = null
+  /** The decorations an eraser stroke leaves, shown in place of the saved ones until it ends. */
+  private strokeDecor: DecorStamp[] | null = null
+  private strokeDrawn = 0
   private theme: Theme | null = null
   private ro: ResizeObserver
   private hasView = false
@@ -208,7 +233,7 @@ export class MapView {
       scale: () => this.view.s,
       settings: (l) => layerSettings(this.profile?.layerSettings, l),
       labels: () => this.layers.labels,
-      invalidate: () => this.invalidate(),
+      invalidate: () => this.invalidate(false),
       emit: (next, phase) => this.hooks.onFeaturesEdit(next, phase),
       onSelection: (ids) => this.hooks.onFeatureSelection(ids),
       warn: (m) => this.hooks.warn(m),
@@ -304,7 +329,7 @@ export class MapView {
     const s = Math.min(this.w / (b.maxX - b.minX), this.hgt / (b.maxY - b.minY)) * 0.96
     this.view = { cx: (b.minX + b.maxX) / 2, cy: (b.minY + b.maxY) / 2, s: Math.max(MIN_S, Math.min(MAX_S, s)) }
     this.hasView = true
-    this.invalidate()
+    this.invalidate(false)
   }
 
   zoomBy(f: number, sx = this.w / 2, sy = this.hgt / 2): void {
@@ -313,14 +338,14 @@ export class MapView {
     const after = this.sView(sx, sy)
     this.view.cx += before.x - after.x
     this.view.cy += before.y - after.y
-    this.invalidate()
+    this.invalidate(false)
   }
 
   centerOn(x: number, y: number, minScale?: number): void {
     this.view.cx = x
     this.view.cy = y
     if (minScale && this.view.s < minScale) this.view.s = minScale
-    this.invalidate()
+    this.invalidate(false)
   }
 
   /** Scale that comfortably shows ~1/8 of the profile width. */
@@ -334,7 +359,13 @@ export class MapView {
     return (this.w / (this.profile.bounds.maxX - this.profile.bounds.minX)) * 4
   }
 
-  invalidate(): void {
+  /**
+   * Redraw on the next frame. `content` (the default) means the terrain or
+   * decorations may have changed and must be repainted; hovering and moving
+   * the view pass false.
+   */
+  invalidate(content = true): void {
+    if (content) this.baseDirty = true
     if (this.raf) return
     this.raf = requestAnimationFrame(() => {
       this.raf = 0
@@ -612,7 +643,7 @@ export class MapView {
         const now = this.sView(mid.x, mid.y)
         this.view.cx += anchor.x - now.x
         this.view.cy += anchor.y - now.y
-        this.invalidate()
+        this.invalidate(false)
         return
       }
       if (g && (g.mode === 'crop' || g.mode === 'imgxf')) {
@@ -632,7 +663,7 @@ export class MapView {
           if (Math.hypot(ls.x - p.x, ls.y - p.y) >= 4) {
             const w = this.toWorld(p.x, p.y)
             this.lasso.push([w.x, w.y])
-            this.invalidate()
+            this.invalidate(false)
           }
         }
         this.updateHover(p.x, p.y)
@@ -738,7 +769,7 @@ export class MapView {
       this.hover = null
       this.hoverPoi = null
       this.renderReadout()
-      this.invalidate()
+      this.invalidate(false)
     })
 
     el.addEventListener(
@@ -810,7 +841,7 @@ export class MapView {
         if (this.tool !== 'pan') this.hooks.onToolDone()
       } else return
       e.preventDefault()
-      this.invalidate()
+      this.invalidate(false)
     })
   }
 
@@ -870,7 +901,7 @@ export class MapView {
     const vcur = isVectorTool(this.tool) ? this.vec.cursorFor(this.tool, sx, sy) : null
     this.el.style.cursor = this.spaceDown || g?.mode === 'pan' ? (g?.moved ? 'grabbing' : 'grab') : crop ? CROP_CURSOR[crop] : (vcur ?? (g?.mode === 'poi' ? 'grabbing' : this.hoverPoi && this.tool === 'pmove' ? 'move' : this.hoverPoi && this.tool === 'pan' ? 'pointer' : ''))
     this.renderReadout()
-    this.invalidate()
+    this.invalidate(false)
   }
 
   // ── Readout ───────────────────────────────────────────────────────────────
@@ -1028,8 +1059,7 @@ export class MapView {
       // A blended picture is a texture laid over the terrain, so it goes above it.
       const picOnTop = this.imageOnTop || PICTURE_TOOLS.has(this.tool) || !!p.image?.blend
       if (this.imageVisible() && !editingImage && !picOnTop) this.drawImage(false)
-      if (p.land && this.layers.land) this.land.draw(this.g, p.land, this.painter, this.w, this.hgt, this.landOpacity)
-      if (p.decor?.length && this.layers.decor) this.decor.draw(this.g, p.decor, this.painter, this.w, this.hgt, this.decorOpacity)
+      this.drawBase(p)
       if (this.imageVisible() && !editingImage && picOnTop) this.drawImage(false)
       this.vec.draw(this.g, this.w, this.hgt, colors)
       if (this.imageVisible() && editingImage) this.drawImage(cropping)
@@ -1079,6 +1109,219 @@ export class MapView {
       if (editingImage) this.drawCropEditor(t, !cropping)
     }
     if (!this.baking) this.drawRulers(step, t)
+  }
+
+  /** Show terrain cells painted by a stroke that isn't saved yet. */
+  previewCells(grid: LandGrid, biome: number, cells: number[]): void {
+    if (!this.strokeCells || this.strokeCells.grid !== grid || this.strokeCells.biome !== biome) {
+      this.strokeCells = { grid, biome, cells: [] }
+      this.strokeStamps = null
+      this.strokeDrawn = 0
+    }
+    this.strokeCells.cells.push(...cells)
+    this.invalidate(false)
+  }
+
+  /** Show decorations added by a stroke that isn't saved yet. */
+  previewStamps(stamps: DecorStamp[]): void {
+    if (!this.strokeStamps) {
+      this.strokeStamps = []
+      this.strokeCells = null
+      this.strokeDrawn = 0
+    }
+    this.strokeStamps.push(...stamps)
+    this.invalidate(false)
+  }
+
+  /**
+   * Show what an eraser stroke that isn't saved yet leaves of the decorations;
+   * only the area around (x, y) is repainted.
+   */
+  previewDecor(list: DecorStamp[], x: number, y: number, radius: number): void {
+    this.strokeDecor = list
+    this.eraseAreas.push({ minX: x - radius, maxX: x + radius, minY: y - radius, maxY: y + radius })
+    this.invalidate(false)
+  }
+
+  /** The stroke was saved (or dropped): stop showing it. */
+  endPreview(): void {
+    if (!this.strokeCells && !this.strokeStamps && !this.strokeDecor) return
+    this.strokeCells = null
+    this.strokeStamps = null
+    this.strokeDecor = null
+    this.eraseAreas = []
+    this.strokeDrawn = 0
+    this.invalidate()
+  }
+
+  /** Maps the world into a cached layer, drawn at the cache's own view with its margin. */
+  private cachePainter(v: View, m: number): import('./terrain').Painter {
+    return {
+      toScreen: (x, y) => ({ x: (x - v.cx) * v.s + this.w / 2 + m, y: this.hgt / 2 - (y - v.cy) * v.s + m }),
+      toWorld: (sx, sy) => ({ x: (sx - m - this.w / 2) / v.s + v.cx, y: v.cy - (sy - m - this.hgt / 2) / v.s }),
+      scale: () => v.s,
+    }
+  }
+
+  /** Paint the stroke's cells or stamps not yet in the cached layers into them. */
+  private paintStroke(): void {
+    const b = this.base
+    if (!b) return
+    const items = this.strokeCells?.cells ?? this.strokeStamps
+    if (!items || this.strokeDrawn >= items.length) return
+    const canvas = this.strokeCells ? b.land : b.decor
+    const g = canvas.getContext('2d')!
+    const painter = this.cachePainter(b.view, b.margin)
+    g.save()
+    g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
+    if (this.strokeCells) {
+      const { grid, biome } = this.strokeCells
+      const graph = graphFor(grid)
+      g.beginPath()
+      for (let i = this.strokeDrawn; i < items.length; i++) {
+        graph.v[items[i] as number].forEach((vt, j) => {
+          const s = painter.toScreen(graph.vp[2 * vt], graph.vp[2 * vt + 1])
+          if (j) g.lineTo(s.x, s.y)
+          else g.moveTo(s.x, s.y)
+        })
+        g.closePath()
+      }
+      if (biome === EMPTY) g.globalCompositeOperation = 'destination-out'
+      g.globalAlpha = biome === EMPTY ? 1 : this.landOpacity
+      g.fillStyle = g.strokeStyle = biome === EMPTY ? '#000' : biomeColor(biome, grid)
+      g.lineWidth = 1
+      g.fill()
+      g.stroke()
+    } else {
+      this.decor.draw(g, (items as DecorStamp[]).slice(this.strokeDrawn), painter, this.w + 2 * b.margin, this.hgt + 2 * b.margin, this.decorOpacity)
+    }
+    g.restore()
+    this.strokeDrawn = items.length
+  }
+
+  /** Terrain and decorations, from the cached layers when they still fit (see `base`). */
+  private drawBase(p: WorldProfile): void {
+    const land = p.land && this.layers.land ? p.land : null
+    const shown = this.strokeDecor ?? p.decor
+    const decor = (shown?.length || this.strokeStamps) && this.layers.decor ? (shown ?? []) : null
+    if (!land && !decor) return
+    if (this.baking) {
+      if (land) this.land.draw(this.g, land, this.painter, this.w, this.hgt, this.landOpacity)
+      if (decor) this.decor.draw(this.g, decor, this.painter, this.w, this.hgt, this.decorOpacity)
+      return
+    }
+    const v = this.view
+    const now = performance.now()
+    const d = this.drawnView
+    if (!d || d.cx !== v.cx || d.cy !== v.cy || d.s !== v.s) this.movedAt = now
+    this.drawnView = { ...v }
+    const size = [this.w, this.hgt, this.dpr]
+    const landKey = [land, this.landOpacity, ...size]
+    const decorKey = [decor, this.decorOpacity, ...size]
+    const same = (a: unknown[], b: unknown[]) => a.length === b.length && a.every((k, i) => k === b[i])
+    const c = this.base
+    const landFresh = !!c && !this.baseDirty && same(c.landKey, landKey)
+    const decorFresh = !!c && !this.baseDirty && same(c.decorKey, decorKey)
+    const sameView = !!c && c.view.cx === v.cx && c.view.cy === v.cy && c.view.s === v.s
+    const moving = now - this.movedAt < 180
+    // While the view moves, shift and scale the cached layers, as long as they still cover most of the view.
+    if (c && landFresh && decorFresh && !sameView && moving) {
+      const k = v.s / c.view.s
+      if (k > 0.5 && k < 3) {
+        const dx = (c.view.cx - v.cx) * v.s
+        const dy = (v.cy - c.view.cy) * v.s
+        const m = c.margin
+        this.paintStroke()
+        for (const layer of [c.land, c.decor]) this.g.drawImage(layer, this.w / 2 + dx - (this.w / 2 + m) * k, this.hgt / 2 + dy - (this.hgt / 2 + m) * k, (this.w + 2 * m) * k, (this.hgt + 2 * m) * k)
+        clearTimeout(this.settleTimer)
+        this.settleTimer = window.setTimeout(() => this.invalidate(false), 200)
+        return
+      }
+    }
+    if (!c || !sameView) this.renderBase(land, decor, landKey, decorKey)
+    else {
+      if (!landFresh) this.renderLayer('land', land, decor, landKey)
+      if (!decorFresh) {
+        // An eraser stroke: repaint only around the brush.
+        if (!this.baseDirty && this.strokeDecor && this.eraseAreas.length) this.repaintDecor(decor, decorKey)
+        else this.renderLayer('decor', land, decor, decorKey)
+      }
+      this.baseDirty = false
+    }
+    this.eraseAreas = []
+    this.paintStroke()
+    const b = this.base!
+    for (const layer of [b.land, b.decor]) this.g.drawImage(layer, -b.margin, -b.margin, this.w + 2 * b.margin, this.hgt + 2 * b.margin)
+  }
+
+  /** Both cached layers, at the current view. */
+  private renderBase(land: LandGrid | null, decor: DecorStamp[] | null, landKey: unknown[], decorKey: unknown[]): void {
+    // A quarter of the view on each side, so short pans don't show bare edges.
+    const margin = Math.round(Math.min(this.w, this.hgt) * 0.25)
+    this.base = {
+      land: this.base?.land ?? document.createElement('canvas'),
+      decor: this.base?.decor ?? document.createElement('canvas'),
+      view: { ...this.view },
+      margin,
+      landKey,
+      decorKey,
+    }
+    this.renderLayer('land', land, decor, landKey)
+    this.renderLayer('decor', land, decor, decorKey)
+    this.baseDirty = false
+    this.strokeDrawn = 0
+  }
+
+  private renderLayer(which: 'land' | 'decor', land: LandGrid | null, decor: DecorStamp[] | null, key: unknown[]): void {
+    const b = this.base!
+    const canvas = b[which]
+    const cw = Math.round((this.w + 2 * b.margin) * this.dpr)
+    const ch = Math.round((this.hgt + 2 * b.margin) * this.dpr)
+    if (canvas.width !== cw || canvas.height !== ch) {
+      canvas.width = cw
+      canvas.height = ch
+    }
+    const g = canvas.getContext('2d')!
+    g.setTransform(1, 0, 0, 1, 0, 0)
+    g.clearRect(0, 0, cw, ch)
+    g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
+    const painter = this.cachePainter(b.view, b.margin)
+    const vw = this.w + 2 * b.margin
+    const vh = this.hgt + 2 * b.margin
+    if (which === 'land' && land) this.land.draw(g, land, painter, vw, vh, this.landOpacity)
+    if (which === 'decor' && decor) this.decor.draw(g, decor, painter, vw, vh, this.decorOpacity)
+    if (which === 'land') b.landKey = key
+    else b.decorKey = key
+    // A stroke being previewed lives in the layer it paints, so it goes back in.
+    if ((which === 'land' && this.strokeCells) || (which === 'decor' && this.strokeStamps)) this.strokeDrawn = 0
+  }
+
+  /** Repaint the decorations layer only inside the areas an eraser stroke touched. */
+  private repaintDecor(decor: DecorStamp[] | null, key: unknown[]): void {
+    const b = this.base!
+    const g = b.decor.getContext('2d')!
+    const painter = this.cachePainter(b.view, b.margin)
+    const vw = this.w + 2 * b.margin
+    const vh = this.hgt + 2 * b.margin
+    // Stamps reach past their centre; repaint neighbours that overlap the area too.
+    let reach = 1
+    for (const s of decor ?? []) if (s.s * 1.5 > reach) reach = s.s * 1.5
+    for (const a of this.eraseAreas) {
+      const p0 = painter.toScreen(a.minX - reach, a.maxY + reach)
+      const p1 = painter.toScreen(a.maxX + reach, a.minY - reach)
+      g.save()
+      g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
+      g.beginPath()
+      g.rect(p0.x, p0.y, p1.x - p0.x, p1.y - p0.y)
+      g.clip()
+      g.clearRect(p0.x, p0.y, p1.x - p0.x, p1.y - p0.y)
+      if (decor) {
+        const near = decor.filter((s) => s.x > a.minX - 3 * reach && s.x < a.maxX + 3 * reach && s.y > a.minY - 3 * reach && s.y < a.maxY + 3 * reach)
+        this.decor.draw(g, near, painter, vw, vh, this.decorOpacity)
+      }
+      g.restore()
+    }
+    b.decorKey = key
   }
 
   private screenRect(px: number, py: number, pw: number, ph: number): { x: number; y: number; w: number; h: number } {

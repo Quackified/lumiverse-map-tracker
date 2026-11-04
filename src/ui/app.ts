@@ -250,7 +250,6 @@ export class MapApp {
   private landDetail = 10000
   private landSeed = { tolerance: 120, smooth: 1, minRegion: 6 }
   private landStroke: Uint8Array | null = null
-  private landFrame = 0
   /** The paint tool to go back to after the eyedropper. */
   private lastPaintTool: LandTool = 'lbrush'
   /** Fill inside the shape under the click, when there is one. */
@@ -262,7 +261,6 @@ export class MapApp {
   private decorOpts = { size: 1, variation: 0.5, density: 1 }
   private decorOnlyBrush = false
   private decorStroke: { list: DecorStamp[]; index: StampIndex; moved: boolean; lastX: number; lastY: number } | null = null
-  private decorFrame = 0
   private confirmClearDecor = false
   /** The user's picture stamps (shared by all maps) and their loaded images. */
   private stamps: StampAsset[] = []
@@ -2871,27 +2869,30 @@ export class MapApp {
       st.moved = true
     }
     if (tool === 'derase') {
-      if (phase !== 'end') st.list = eraseStamps(st.list, x, y, radius, this.decorOnlyBrush ? brush : undefined)
+      if (phase !== 'end') {
+        const before = st.list.length
+        st.list = eraseStamps(st.list, x, y, radius, this.decorOnlyBrush ? brush : undefined)
+        // Shown straight away; saved when the stroke ends.
+        if (st.list.length !== before) this.map.previewDecor(st.list, x, y, radius)
+        return
+      }
     } else if (phase === 'move') {
       // A dab per step of about a third of the brush, so a slow drag doesn't pile up.
       if (Math.hypot(x - st.lastX, y - st.lastY) < radius * 0.33 && st.moved) return
-      st.list.push(...brushDab(brush, unit, this.decorOpts, x, y, radius, st.index))
+      const dab = brushDab(brush, unit, this.decorOpts, x, y, radius, st.index)
+      st.list.push(...dab)
       st.lastX = x
       st.lastY = y
+      // Shown straight away; saved when the stroke ends.
+      if (dab.length) this.map.previewStamps(dab)
+      return
     } else if (phase === 'end' && !st.moved) {
       // A click places one stamp right there.
       st.list.push(...brushDab(brush, unit, this.decorOpts, x, y, radius, st.index, true))
     }
-    if (phase !== 'end') {
-      if (!this.decorFrame) this.decorFrame = requestAnimationFrame(() => {
-        this.decorFrame = 0
-        if (this.decorStroke) this.commitDecor(false)
-      })
-      return
-    }
-    if (this.decorFrame) cancelAnimationFrame(this.decorFrame)
-    this.decorFrame = 0
+    if (phase !== 'end') return
     this.commitDecor(true)
+    this.map.endPreview()
     this.decorStroke = null
     this.editGroup = null
   }
@@ -3159,7 +3160,8 @@ export class MapApp {
     const stroke = this.landStroke
     if (!stroke) return
     if (phase !== 'end') {
-      let changed = false
+      // Shown straight away; saved once when the stroke ends.
+      const changed: number[] = []
       for (const c of cellsWithin(graph, x, y, this.map.brushPx * this.map.unitsPerPx())) {
         if (stroke[c] === target) continue
         if (!allowed(stroke[c])) {
@@ -3168,19 +3170,13 @@ export class MapApp {
         }
         stroke[c] = target
         this.landPainted++
-        changed = true
+        changed.push(c)
       }
-      if (changed && !this.landFrame) {
-        this.landFrame = requestAnimationFrame(() => {
-          this.landFrame = 0
-          if (this.landStroke) this.commitStroke(false)
-        })
-      }
+      if (changed.length) this.map.previewCells(grid, target, changed)
       return
     }
-    if (this.landFrame) cancelAnimationFrame(this.landFrame)
-    this.landFrame = 0
     this.commitStroke(true)
+    this.map.endPreview()
     this.landStroke = null
     this.editGroup = null
     if (this.landBlocked && !this.landPainted)

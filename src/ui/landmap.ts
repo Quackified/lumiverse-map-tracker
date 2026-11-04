@@ -1,4 +1,4 @@
-import { LAKE, OCEAN, biomeColor, biomesOf, decodeBytes, dropSmallRegions, findCell, graphFor, isWater, regionRings, smoothCells, type Graph } from '../shared/cells'
+import { EMPTY, LAKE, OCEAN, biomeColor, biomesOf, decodeBytes, dropSmallRegions, findCell, graphFor, isWater, regionRings, smoothCells, type Graph } from '../shared/cells'
 import { worldToImage } from '../shared/geo'
 import type { LandGrid, MapImageMeta } from '../shared/types'
 import { paintSymbols, type Painter } from './terrain'
@@ -29,6 +29,7 @@ interface Built {
   graph: Graph
   biomes: Uint8Array
   coast: Path2D
+  ocean: Path2D | null
   lakes: Path2D | null
   regions: { biome: number; path: Path2D; minX: number; minY: number; maxX: number; maxY: number }[]
   /** World units across one cell. */
@@ -54,8 +55,15 @@ export class LandRenderer {
     if (this.built?.key === key) return this.built
     const graph = graphFor(grid)
     const biomes = biomesOf(grid, graph)
+    const isLand = (c: number) => biomes[c] !== EMPTY && !isWater(biomes[c])
     const coast = new Path2D()
-    for (const r of regionRings(graph, (c) => (isWater(biomes[c]) ? null : 1)).get(1) ?? []) addRing(coast, r)
+    for (const r of regionRings(graph, (c) => (isLand(c) ? 1 : null)).get(1) ?? []) addRing(coast, r)
+    let ocean: Path2D | null = null
+    const oceanRings = regionRings(graph, (c) => (biomes[c] === OCEAN ? 1 : null)).get(1)
+    if (oceanRings?.length) {
+      ocean = new Path2D()
+      for (const r of oceanRings) addRing(ocean, r)
+    }
     let lakes: Path2D | null = null
     const lakeRings = regionRings(graph, (c) => (biomes[c] === LAKE ? 1 : null)).get(1)
     if (lakeRings?.length) {
@@ -63,7 +71,7 @@ export class LandRenderer {
       for (const r of lakeRings) addRing(lakes, r)
     }
     const regions: Built['regions'] = []
-    for (const [biome, rings] of regionRings(graph, (c) => (isWater(biomes[c]) ? null : biomes[c]))) {
+    for (const [biome, rings] of regionRings(graph, (c) => (isLand(c) ? biomes[c] : null))) {
       const path = new Path2D()
       let minX = Infinity
       let minY = Infinity
@@ -80,7 +88,7 @@ export class LandRenderer {
       }
       regions.push({ biome, path, minX, minY, maxX, maxY })
     }
-    this.built = { key, graph, biomes, coast, lakes, regions, cell: Math.max(graph.dx, graph.dy) }
+    this.built = { key, graph, biomes, coast, ocean, lakes, regions, cell: Math.max(graph.dx, graph.dy) }
     return this.built
   }
 
@@ -89,7 +97,8 @@ export class LandRenderer {
     const b = grid.bounds
     if (x < b.minX || x > b.maxX || y < b.minY || y > b.maxY) return null
     const built = this.build(grid)
-    return built.biomes[findCell(built.graph, x, y)]
+    const v = built.biomes[findCell(built.graph, x, y)]
+    return v === EMPTY ? null : v
   }
 
   draw(g: CanvasRenderingContext2D, grid: LandGrid, p: Painter, viewW: number, viewH: number, opacity = 1): void {
@@ -98,18 +107,28 @@ export class LandRenderer {
     const o = p.toScreen(0, 0)
     g.save()
     g.globalAlpha *= opacity
-    g.fillStyle = biomeColor(OCEAN, grid)
-    g.fillRect(0, 0, viewW, viewH)
     g.save()
     g.translate(o.x, o.y)
     g.scale(s, -s)
     g.lineJoin = 'round'
-    // Shallow water: soft bands just off the coast.
-    g.strokeStyle = 'rgba(255,255,255,0.10)'
-    g.lineWidth = 14 / s
-    g.stroke(built.coast)
-    g.lineWidth = 6 / s
-    g.stroke(built.coast)
+    // Only painted cells are drawn: unpainted ones leave the picture showing.
+    if (built.ocean) {
+      const sea = biomeColor(OCEAN, grid)
+      g.fillStyle = sea
+      g.strokeStyle = sea
+      g.lineWidth = built.cell * 0.9
+      g.fill(built.ocean, 'evenodd')
+      g.stroke(built.ocean)
+      // Shallow water: soft bands just off the coast.
+      g.save()
+      g.clip(built.ocean, 'evenodd')
+      g.strokeStyle = 'rgba(255,255,255,0.10)'
+      g.lineWidth = 14 / s
+      g.stroke(built.coast)
+      g.lineWidth = 6 / s
+      g.stroke(built.coast)
+      g.restore()
+    }
     // Biomes, each stroked in its own colour too so smoothed neighbours leave no seams.
     g.save()
     g.clip(built.coast, 'evenodd')
@@ -236,7 +255,7 @@ export function seedFromImage(grid: LandGrid, meta: MapImageMeta, sampler: Sampl
   const graph = graphFor(grid)
   const out = new Uint8Array(decodeBytes(grid.biome, graph.n))
   if (!samples.length) return out
-  const UNKNOWN = 255
+  const UNKNOWN = 254
   const crop = meta.crop
   const step = Math.max(graph.dx, graph.dy) * 0.22
   for (let i = 0; i < graph.n; i++) {

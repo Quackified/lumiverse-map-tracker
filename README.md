@@ -29,17 +29,18 @@ The layout follows image editors such as Photoshop or Affinity:
 
   | Tool | Key | | Tool | Key |
   |---|---|---|---|---|
-  | Hand | H | | Select shapes | V |
+  | Hand | H | | Select features | V |
   | Measure | M | | Draw area | R |
   | My position | P | | Draw line | L |
   | Destination | D | | Place spot | S |
   | Add place | A | | Biome brush | B |
   | Move places | O | | Biome fill | G |
-  | Draw zone | Z | | Sample picture colour | I |
+  | Draw zone | Z | | Biome lasso | J |
+  | | | | Biome eyedropper | I |
 
   Clicking a tool always selects it; Esc returns to the hand.
 - **Options bar** (under the top bar): the active tool's settings, such as the brush's biome, size and Keep coastline, or the shape layer and type, and a one-line hint.
-- **Layers** (right): every drawn layer, top first, with visibility, lock and opacity: Places (with labels), Trail, Zones, Regions, the four Shapes layers, Land, Picture and Grid. Click a layer to edit it in Properties.
+- **Layers** (right): every drawn layer, top first, with visibility, lock and opacity: Places (with labels), Trail, Zones, Regions, the four Features layers, Terrain, Picture and Grid. Click a layer to edit it in Properties.
 - **Properties** (right, below Layers): the content behind the chosen layer or the active tool: the places list and editor, zones, the selected shape, the biome palette and seeding, or the picture's crop and calibration.
 
 ## Map fields in lorebook entries (preferred)
@@ -138,23 +139,28 @@ Once places live on the map, the coordinates written into entries can point at i
 - **Apply** writes only the ticked changes, skips any entry edited since the preview, and turns on the lorebook variable if it was off. The original text of every changed entry is saved first; **Lorebook backups** lists them, and **Restore** (click twice) puts entries back. A restore is backed up too.
 - Converted entries still import: references are read back as the coordinates they stand for.
 
-## Land (cells and biomes)
+## Terrain (biomes)
 
-The **Land** layer turns the world into a few thousand small irregular cells, each with a biome, and draws them as the map: ocean with a soft shallow-water edge, biomes with smooth borders, a coastline, lakes, and terrain symbols (trees in forests, conifers in taiga, grass, dunes, reeds, peaks on mountains, mounds on hills).
+**Terrain** is the ground of your world: a few thousand small irregular cells, each painted with a biome, drawn as ocean with a soft shallow-water edge, biomes with smooth borders, a coastline, lakes, and terrain symbols (trees in forests, conifers in taiga, grass, dunes, reeds, peaks on mountains, mounds on hills).
 
-- Click the Land layer, then **Create land grid**. It covers the canvas. Detail sets the cell count (Coarse ~4,000 to Ultra ~80,000).
-- **Canvas size** (Canvas in the top bar) sets how far the world extends. With **Linked** on (the default), changing one edge sets the others to match: 1000 gives -1000 to 1000 on both axes. Turn it off to set each edge, or use **Fit to content**. On **Apply**, the land grid is rebuilt over the new canvas with the painting kept; new area starts as ocean, and land outside a smaller canvas is cut off. A grid that doesn't match the canvas offers **Resize grid to canvas**.
-- **Biomes:** Fantasy Map Generator's set (ocean, hot and cold desert, savanna, grassland, four forest types, taiga, tundra, glacier, wetland) plus lake, mountains and hills. Click a biome in Properties (or pick one in the options bar) to paint with it; its swatch changes its colour (↺ restores the default).
-- **Biome brush** (B) paints cells under the circle (size in the options bar); **Biome fill** (G) recolours a connected region. **Keep coastline** (options bar, off by default) stops a land biome from painting over water and water from painting over land. Alt+click with the brush picks the biome under the cursor. Space+drag pans. Every stroke can be undone.
-- **Seed from the map picture:** pick a biome, choose **Sample picture colour** (I, or **Pick colour**), and click the picture where it shows that biome (the picture comes to the front while picking). Add a sample for each look: the sea, each forest colour, sand, snow, rock. **Generate** gives every cell on the picture the biome of the nearest sample colour. **Tolerance** leaves colours unlike every sample (labels, ships, ink) to their neighbours; **Smoothing** clears speckle; **Min island** merges tiny islands and lakes. Crop the picture to the map itself first, or its frame becomes land; any leftovers are one Fill click away.
-- **Display:** terrain symbols on or off, and **Picture on top** to compare against the picture while painting. Opacity is on the Land layer row.
-- Hovering shows the biome under the cursor.
+- Every map can be painted: pick a biome tool and the terrain is there. It starts **unpainted**, which is see-through, so the picture and features show until you paint over them. Ocean is a biome you paint like any other.
+- **Biomes:** Fantasy Map Generator's set (ocean, hot and cold desert, savanna, grassland, four forest types, taiga, tundra, glacier, wetland) plus lake, mountains and hills, and an **Eraser** that paints cells back to unpainted. Click a biome in Properties (or pick one in the options bar) to paint with it; its swatch changes its colour (↺ restores the default).
+- **Biome brush** (B) paints cells under the circle (size in the options bar).
+- **Biome fill** (G): click inside a shape (a land, lake or terrain area in Features) to fill exactly that shape, or anywhere else to fill the connected area of the same biome. Shift+click always fills the connected area; **Fill inside shapes** in the options bar turns the shape behaviour off.
+- **Biome lasso** (J): drag around an area and everything inside becomes the selected biome.
+- **Biome eyedropper** (I), or Alt+click with any biome tool: picks the biome under the cursor, then goes back to the tool you were painting with.
+- **Keep coastline** (options bar, off by default) stops a land biome from painting over water and water from painting over land.
+- **Paint shapes as terrain** (Terrain or Features properties): land shapes become grassland with sea around them, lakes become lake, and forest, conifer, jungle, grassland, desert, snow, swamp, volcanic and hill areas become their biomes. The shapes are hidden, not deleted; **Show them** in Features brings them back.
+- **Canvas size** (Canvas in the top bar) sets how big the world is: a width and a height in map units, always positive, kept centred where the canvas is now (a new map is centred on 0, so 2000 × 2000 spans -1000 to 1000). The link button keeps the proportions. **Fit to content** sizes it to your places, zones and shapes. On **Apply**, the terrain is rebuilt over the new canvas with the painting kept; new area starts unpainted, and terrain outside a smaller canvas is cut off. Terrain that doesn't cover the canvas offers **Fit terrain to canvas**.
+- **Seed from the map picture:** pick a biome, click **Pick colour**, and click the picture where it shows that biome (the picture comes to the front while picking). Add a sample for each look: the sea, each forest colour, sand, snow, rock. **Generate** gives every cell on the picture the biome of the nearest sample colour. **Tolerance** leaves colours unlike every sample (labels, ships, ink) to their neighbours; **Smoothing** clears speckle; **Min island** merges tiny islands and lakes. Crop the picture to the map itself first, or its frame becomes land; any leftovers are one Fill click away.
+- **Display:** terrain symbols on or off, **Picture on top** to compare against the picture while painting, and **Detail** (Coarse ~4,000 to Ultra ~80,000 cells; changing it keeps the painting). Opacity is on the Terrain layer row. **Clear terrain** goes back to fully unpainted.
+- Hovering shows the biome under the cursor. Every stroke can be undone.
 
 Cells and biomes are adapted from [Azgaar's Fantasy Map Generator](https://github.com/Azgaar/Fantasy-Map-Generator) (MIT, © Max Haniyeu): the jittered lattice and Voronoi graph, the region outline tracing, and the default biome set and colours.
 
-## Shapes (vector layers)
+## Features (vector layers)
 
-Draw the world itself in world coordinates, so the map conforms to your data instead of to a picture. Click a Shapes layer in Layers to draw on it, then use Select (V), Area (R), Line (L) or Spot (S); the options bar picks the layer and what to draw. Visibility, lock and opacity per layer are on the layer rows.
+Rivers, roads, mountain and hill ranges, borders, landmarks and outlines, in world coordinates. The ground itself is painted in Terrain; area shapes here work as outlines that Biome fill can fill, or that **Paint shapes as terrain** converts. Click a Features layer in Layers to draw on it, then use Select (V), Area (R), Line (L) or Spot (S); the options bar picks the layer and what to draw. Visibility, lock and opacity per layer are on the layer rows.
 
 | Layer | Holds |
 |---|---|

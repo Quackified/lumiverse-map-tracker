@@ -1,6 +1,6 @@
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types'
 import { bearing, boundsOf, calibMaps, calibrationForBounds, compass, distanceUnits, formatCoord, formatKm, imageToWorld, locate, normalizeCalib, rectCalibration } from '../shared/geo'
-import { FEATURE_TYPES, LAYER_LABEL, LAYER_ORDER, featuresFromJson, featuresToGeoJson, layerSettings, newFeatureId } from '../shared/features'
+import { FEATURE_TYPES, LAYER_LABEL, LAYER_ORDER, featuresFromJson, featuresToGeoJson, layerSettings, newFeatureId, pointInRings } from '../shared/features'
 import { entriesFromLorebookJson, hasMapData, parseMapEntries } from '../shared/mapext'
 import { mergeInto, newProfile, parseCoordinateText, slug, type ParseResult } from '../shared/parser'
 import { VAR_NAME_RE, isMoved, movePoint, placeRef, placeText, placesVarName, revertPoint } from '../shared/places'
@@ -27,7 +27,7 @@ import { History } from './history'
 import { MapView, type Layers, type Tool } from './viewport'
 import { isVectorTool } from './vector'
 import { DENSITY_PRESETS, hasSymbols } from './terrain'
-import { BIOMES, DETAIL, MAX_CELLS, resampleGrid, DEFAULT_LAND, biomeColor, biomeName, biomesOf, cellsWithin, encodeBytes, findCell, floodCells, graphFor, isWater, newGrid } from '../shared/cells'
+import { BIOMES, DETAIL, MAX_CELLS, resampleGrid, cellsInRings, EMPTY, DEFAULT_CELLS, LAKE, OCEAN, DEFAULT_LAND, biomeColor, biomeName, biomesOf, cellsWithin, encodeBytes, findCell, floodCells, graphFor, isWater, newGrid } from '../shared/cells'
 import { colorAt, makeSampler, seedFromImage, type Sampler } from './landmap'
 import { isLandTool, type LandTool } from './viewport'
 import { worldToImage } from '../shared/geo'
@@ -39,7 +39,7 @@ type Panel = 'points' | 'zones' | 'land' | 'layers' | 'image'
 /** Occasional tasks, opened from the top bar over the map. */
 type Dialog = 'chat' | 'import' | 'map' | 'canvas'
 
-const PANEL_TITLE: Record<Panel, string> = { points: 'Places', zones: 'Zones & regions', land: 'Land', layers: 'Shapes', image: 'Picture' }
+const PANEL_TITLE: Record<Panel, string> = { points: 'Places', zones: 'Zones & regions', land: 'Terrain', layers: 'Features', image: 'Picture' }
 const DIALOG_TITLE: Record<Dialog, string> = { chat: 'Story', import: 'Import', map: 'Map settings', canvas: 'Canvas size' }
 
 /** The tool rail, in groups, with single-key shortcuts. */
@@ -58,7 +58,7 @@ const RAIL: { tool: Tool; icon: IconName; label: string; key: string }[][] = [
     { tool: 'zone', icon: 'zone', label: 'Draw zone', key: 'z' },
   ],
   [
-    { tool: 'vselect', icon: 'select', label: 'Select shapes', key: 'v' },
+    { tool: 'vselect', icon: 'select', label: 'Select features', key: 'v' },
     { tool: 'varea', icon: 'area', label: 'Draw area', key: 'r' },
     { tool: 'vline', icon: 'line', label: 'Draw line', key: 'l' },
     { tool: 'vspot', icon: 'spot', label: 'Place spot', key: 's' },
@@ -66,9 +66,23 @@ const RAIL: { tool: Tool; icon: IconName; label: string; key: string }[][] = [
   [
     { tool: 'lbrush', icon: 'brush', label: 'Biome brush', key: 'b' },
     { tool: 'lfill', icon: 'bucket', label: 'Biome fill', key: 'g' },
-    { tool: 'lsample', icon: 'dropper', label: 'Sample picture colour', key: 'i' },
+    { tool: 'llasso', icon: 'lasso', label: 'Biome lasso', key: 'j' },
+    { tool: 'lpick', icon: 'dropper', label: 'Biome eyedropper', key: 'i' },
   ],
 ]
+
+/** Terrain shape types and the biome each paints as. */
+const SHAPE_BIOME: Record<string, number> = {
+  forest: 6,
+  pine: 9,
+  jungle: 7,
+  grassland: 4,
+  desert: 1,
+  snow: 11,
+  swamp: 12,
+  volcanic: 14,
+  hills: 15,
+}
 
 /** The panel each tool works on. */
 const TOOL_PANEL: Partial<Record<Tool, Panel>> = {
@@ -81,6 +95,8 @@ const TOOL_PANEL: Partial<Record<Tool, Panel>> = {
   vspot: 'layers',
   lbrush: 'land',
   lfill: 'land',
+  llasso: 'land',
+  lpick: 'land',
   lsample: 'land',
   crop: 'image',
   imgxf: 'image',
@@ -95,13 +111,15 @@ const TOOL_HINT: Partial<Record<Tool, string>> = {
   crop: 'Drag the corners or edges to crop; drag inside to move the box. Esc when done.',
   zone: 'Drag a rectangle to create a zone.',
   imgxf: 'Drag inside the picture to move it; corners scale (Shift keeps proportions), edges stretch. Esc when done.',
-  vselect: 'Click a shape (Shift adds); drag to move; handles scale. Drag a vertex, double-click an edge to add one, Delete removes. Space+drag pans.',
+  vselect: 'Click a feature (Shift adds); drag to move; handles scale. Drag a vertex, double-click an edge to add one, Delete removes. Space+drag pans.',
   varea: 'Click to add points or drag freehand; Enter or double-click finishes; Backspace undoes a point; Esc cancels.',
   vline: 'Click to add points or drag freehand; Enter or double-click finishes; Backspace undoes a point; Esc cancels.',
   vspot: 'Click to place.',
   lbrush: 'Drag to paint the selected biome. Alt+click picks the biome under the cursor. Space+drag pans; Esc stops painting.',
-  lfill: 'Click a region to fill it with the selected biome. Esc stops.',
-  lsample: 'Click the picture where it shows the selected biome to add a colour sample, then Generate.',
+  lfill: 'Click inside a shape to fill the shape, or anywhere else to fill the connected area. Shift+click always fills the connected area.',
+  llasso: 'Drag around an area: everything inside becomes the selected biome.',
+  lpick: 'Click the terrain to pick its biome, then carry on painting.',
+  lsample: 'Seeding: click the picture where it shows the selected biome to add a colour sample, then Generate.',
   pmove: 'Drag places to move them (Shift 10, Alt 0.1); arrows nudge. Rings mark lorebook positions.',
 }
 
@@ -199,6 +217,10 @@ export class MapApp {
   private landSeed = { tolerance: 120, smooth: 1, minRegion: 6 }
   private landStroke: Uint8Array | null = null
   private landFrame = 0
+  /** The paint tool to go back to after the eyedropper. */
+  private lastPaintTool: LandTool = 'lbrush'
+  /** Fill inside the shape under the click, when there is one. */
+  private landFillShapes = true
   private confirmRemoveLand = false
   private picture: HTMLImageElement | null = null
   private sampler: Sampler | null = null
@@ -237,6 +259,7 @@ export class MapApp {
         onSelectPoi: (poi) => this.onSelectPoi(poi),
         onPoiMove: (id, x, y, phase) => this.onPoiMove(id, x, y, phase),
         onLand: (tool, phase, x, y, e) => this.onLand(tool, phase, x, y, e),
+        onLandPolygon: (pts) => this.onLandPolygon(pts),
         onContextMenu: (x, y, poi, cx, cy) => this.openMenu(x, y, poi, cx, cy),
         onToolDone: () => this.setTool('pan'),
         onImageEdit: (patch, phase) => this.onImageEdit(patch, phase),
@@ -574,15 +597,18 @@ export class MapApp {
   /** A tool chosen on the rail or by its key. Land tools need a grid, the sampler a picture. */
   private pickTool(t: Tool): void {
     if (t !== 'pan' && t !== 'measure' && !this.profile) return this.warn('Pick or create a map first.')
-    if (isLandTool(t) && !this.profile?.land) {
-      this.openPanel('land')
-      return this.warn('Create a land grid first (Land, in Properties).')
-    }
     if (t === 'lsample' && !this.profile?.image) return this.warn('Upload a map picture first (Picture layer).')
+    if (isLandTool(t)) this.ensureLand()
     this.setTool(t)
   }
 
+  /** Every map can be painted: the terrain grid is made on first use, all unpainted. */
+  private ensureLand(): void {
+    if (this.profile && !this.profile.land) this.mutate((d) => (d.land ??= newGrid({ ...d.bounds }, DEFAULT_CELLS)), false, null)
+  }
+
   private setTool(t: Tool): void {
+    if (t === 'lbrush' || t === 'lfill' || t === 'llasso') this.lastPaintTool = t
     this.map.setTool(t)
     for (const [tool, b] of this.toolButtons) b.classList.toggle('mt-on', tool === t)
     this.hint.hidden = true
@@ -842,7 +868,7 @@ export class MapApp {
   }
 
   private renderProps(): void {
-    this.propsTitle.textContent = this.panel === 'layers' ? `Shapes · ${LAYER_LABEL[this.map.vec.drawLayer]}` : PANEL_TITLE[this.panel]
+    this.propsTitle.textContent = this.panel === 'layers' ? `Features · ${LAYER_LABEL[this.map.vec.drawLayer]}` : PANEL_TITLE[this.panel]
     const body = this.sideBody
     const scroll = body.scrollTop
     clear(body)
@@ -929,7 +955,7 @@ export class MapApp {
       row({ label: 'Trail', visible: L.trail, onEye: () => flip('trail') }),
       row({ label: 'Zones', visible: L.zones, onEye: () => flip('zones'), on: this.panel === 'zones', open: () => this.openPanel('zones'), count: p.zones.filter((z) => z.kind !== 'region').length }),
       row({ label: 'Regions', visible: L.regions, onEye: () => flip('regions'), on: this.panel === 'zones', open: () => this.openPanel('zones'), count: p.zones.filter((z) => z.kind === 'region').length }),
-      h('button', { class: `mt-lgroup${this.panel === 'layers' ? ' mt-on' : ''}`, onclick: () => this.openPanel('layers') }, 'Shapes'),
+      h('button', { class: `mt-lgroup${this.panel === 'layers' ? ' mt-on' : ''}`, onclick: () => this.openPanel('layers') }, 'Features'),
       ...LAYER_ORDER.slice()
         .reverse()
         .map((layer) => {
@@ -949,12 +975,11 @@ export class MapApp {
           })
         }),
       row({
-        label: 'Land',
+        label: 'Terrain',
         visible: L.land,
         onEye: () => flip('land'),
         on: this.panel === 'land',
         open: () => this.openPanel('land'),
-        count: p.land ? undefined : 'none',
         extra: p.land
           ? [
               range(this.map.landOpacity, (v) => {
@@ -1022,6 +1047,7 @@ export class MapApp {
     swatch.style.background = biomeColor(this.landBiome, grid)
     const sel = h('select', { class: 'mt-select', title: 'Biome to paint (Alt+click on the map picks one)' })
     for (const b of BIOMES) sel.append(h('option', { value: String(b.id), selected: b.id === this.landBiome }, biomeName(b.id, grid)))
+    sel.append(h('option', { value: String(EMPTY), selected: this.landBiome === EMPTY }, 'Eraser (unpainted)'))
     sel.addEventListener('change', () => {
       this.landBiome = Number(sel.value)
       swatch.style.background = biomeColor(this.landBiome, grid)
@@ -1036,7 +1062,13 @@ export class MapApp {
       })
       out.push(h('label', { class: 'mt-opt' }, h('span', { class: 'mt-dim' }, 'Size'), size))
     }
-    if (t === 'lbrush' || t === 'lfill') {
+    if (t === 'lpick') return [h('span', { class: 'mt-dim' }, `Picking for the ${this.lastPaintTool === 'lfill' ? 'fill' : this.lastPaintTool === 'llasso' ? 'lasso' : 'brush'}`)]
+    if (t === 'lfill') {
+      const shapes = h('input', { type: 'checkbox', checked: this.landFillShapes })
+      shapes.addEventListener('change', () => (this.landFillShapes = shapes.checked))
+      out.push(h('label', { class: 'mt-opt mt-check', title: 'Clicking inside a land, lake or terrain shape fills exactly that shape' }, shapes, 'Fill inside shapes'))
+    }
+    if (t === 'lbrush' || t === 'lfill' || t === 'llasso') {
       const keep = h('input', { type: 'checkbox', checked: this.landKeepCoast })
       keep.addEventListener('change', () => (this.landKeepCoast = keep.checked))
       out.push(h('label', { class: 'mt-opt mt-check', title: 'Land biomes only paint over land, water only over water' }, keep, 'Keep coastline'))
@@ -1992,73 +2024,67 @@ export class MapApp {
   private renderLandTab(body: HTMLElement): void {
     const p = this.profile!
     const grid = p.land
-    if (!grid) {
-      const detail = h('select', { class: 'mt-select' })
-      for (const [n, label] of DETAIL) detail.append(h('option', { value: String(n), selected: n === this.landDetail }, `${label} (~${n.toLocaleString()} cells)`))
-      detail.addEventListener('change', () => (this.landDetail = Number(detail.value)))
-      body.append(
-        h('h4', null, 'Land grid'),
-        h(
-          'div',
-          { class: 'mt-dim' },
-          'Paint the world as small cells, each with a biome: ocean, grassland, forest, taiga, desert, mountains and more. Start from an empty ocean, then paint, or seed it from your map picture by sampling its colours. Cells and biomes are adapted from Azgaar’s Fantasy Map Generator (MIT).',
-        ),
-        h('div', { class: 'mt-form' }, h('label', null, 'Detail'), detail),
-        h(
-          'div',
-          { class: 'mt-row' },
-          h(
-            'button',
-            {
-              class: 'mt-btn mt-primary',
-              onclick: () => {
-                const bounds = { ...p.bounds }
-                this.mutate((d) => {
-                  d.land = newGrid(bounds, this.landDetail)
-                })
-                this.setTool('lbrush')
-              },
-            },
-            'Create land grid',
-          ),
-        ),
-        h('div', { class: 'mt-row mt-wrap' }, h('span', { class: 'mt-dim' }, `It covers the canvas, ${fmtBounds(p.bounds)}.`), h('button', { class: 'mt-link', onclick: () => this.openDialog('canvas') }, 'Canvas size…')),
-      )
-      return
-    }
-
-    const graph = graphFor(grid)
-    const biomes = biomesOf(grid, graph)
+    const graph = grid ? graphFor(grid) : null
     const counts = new Map<number, number>()
-    for (let i = 0; i < biomes.length; i++) counts.set(biomes[i], (counts.get(biomes[i]) ?? 0) + 1)
-    const gb = grid.bounds
-    const cb = p.bounds
-    if (gb.minX !== cb.minX || gb.maxX !== cb.maxX || gb.minY !== cb.minY || gb.maxY !== cb.maxY) {
-      // Grids made before Canvas size (or with a margin) don't match the canvas: offer to follow it.
-      const same = Math.min(MAX_CELLS, Math.round((grid.cells * (cb.maxX - cb.minX) * (cb.maxY - cb.minY)) / ((gb.maxX - gb.minX) * (gb.maxY - gb.minY))))
-      body.append(
-        h(
-          'div',
-          { class: 'mt-editor' },
-          h('div', null, `The land grid covers ${fmtBounds(gb)}, but the canvas is ${fmtBounds(cb)}. Painting only works inside the grid.`),
+    if (grid && graph) {
+      const biomes = biomesOf(grid, graph)
+      for (let i = 0; i < biomes.length; i++) counts.set(biomes[i], (counts.get(biomes[i]) ?? 0) + 1)
+    }
+    if (grid) {
+      const gb = grid.bounds
+      const cb = p.bounds
+      if (gb.minX !== cb.minX || gb.maxX !== cb.maxX || gb.minY !== cb.minY || gb.maxY !== cb.maxY) {
+        // Grids made before Canvas size (or with a margin) don't match the canvas: offer to follow it.
+        const same = Math.min(MAX_CELLS, Math.round((grid.cells * (cb.maxX - cb.minX) * (cb.maxY - cb.minY)) / ((gb.maxX - gb.minX) * (gb.maxY - gb.minY))))
+        body.append(
           h(
             'div',
-            { class: 'mt-row mt-wrap' },
-            h('button', { class: 'mt-btn mt-primary', onclick: () => this.mutate((d) => d.land && (d.land = resampleGrid(d.land, { ...d.bounds }, same))) }, 'Resize grid to canvas'),
-            h('span', { class: 'mt-dim' }, `${same.toLocaleString()} cells, painting kept`),
+            { class: 'mt-editor' },
+            h('div', null, 'The terrain doesn\u2019t cover the whole canvas, so painting stops at its edge.'),
+            h(
+              'div',
+              { class: 'mt-row mt-wrap' },
+              h('button', { class: 'mt-btn mt-primary', onclick: () => this.mutate((d) => d.land && (d.land = resampleGrid(d.land, { ...d.bounds }, same))) }, 'Fit terrain to canvas'),
+              h('span', { class: 'mt-dim' }, 'painting kept'),
+            ),
           ),
-        ),
-      )
+        )
+      }
     }
-    body.append(h('div', { class: 'mt-dim' }, 'Pick a biome, then paint with the Brush (B) or Fill (G) on the left. Alt+click on the map picks the biome under the cursor.'))
+    body.append(
+      h(
+        'div',
+        { class: 'mt-dim' },
+        'The ground of your world, painted in biomes. Pick one, then use the Brush (B), Fill (G) or Lasso (J); the Eyedropper (I) or Alt+click picks a biome from the map. Unpainted ground is see-through.',
+      ),
+    )
+    const pick = (id: number) => {
+      this.landBiome = id
+      if (!isLandTool(this.map.tool) || this.map.tool === 'lpick' || this.map.tool === 'lsample') this.pickTool(this.lastPaintTool)
+      else {
+        this.renderSide(true)
+        this.renderOptions()
+      }
+    }
 
     // Palette: pick the biome to paint; the swatch changes its colour.
     const pal = h('div', { class: 'mt-list' })
+    pal.append(
+      h(
+        'div',
+        { class: `mt-item mt-biome${this.landBiome === EMPTY ? ' mt-on' : ''}` },
+        h('span', { class: 'mt-swatch mt-swatch-empty', title: 'Unpainted' }),
+        h('button', { class: 'mt-item-name', title: 'Paint cells back to unpainted', onclick: () => pick(EMPTY) }, 'Eraser (unpainted)'),
+        h('span', { class: 'mt-dim mt-mono' }, graph && counts.get(EMPTY) ? `${Math.round(((counts.get(EMPTY) ?? 0) / graph.n) * 100)}%` : ''),
+        h('span'),
+      ),
+    )
     for (const b of BIOMES) {
       const color = h('input', { class: 'mt-color', type: 'color', value: biomeColor(b.id, grid), title: 'Change colour' })
       color.addEventListener('change', () =>
         this.mutate((d) => {
-          d.land!.colors = { ...d.land!.colors, [b.id]: color.value }
+          d.land ??= newGrid({ ...d.bounds }, DEFAULT_CELLS)
+          d.land.colors = { ...d.land.colors, [b.id]: color.value }
         }),
       )
       const n = counts.get(b.id) ?? 0
@@ -2067,23 +2093,9 @@ export class MapApp {
           'div',
           { class: `mt-item mt-biome${b.id === this.landBiome ? ' mt-on' : ''}` },
           color,
-          h(
-            'button',
-            {
-              class: 'mt-item-name',
-              onclick: () => {
-                this.landBiome = b.id
-                if (!isLandTool(this.map.tool)) this.setTool('lbrush')
-                else {
-                  this.renderSide(true)
-                  this.renderOptions()
-                }
-              },
-            },
-            biomeName(b.id, grid),
-          ),
-          h('span', { class: 'mt-dim mt-mono' }, n ? `${Math.round((n / graph.n) * 100)}%` : ''),
-          grid.colors?.[b.id]
+          h('button', { class: 'mt-item-name', onclick: () => pick(b.id) }, biomeName(b.id, grid)),
+          h('span', { class: 'mt-dim mt-mono' }, graph && n ? `${Math.round((n / graph.n) * 100)}%` : ''),
+          grid?.colors?.[b.id]
             ? h(
                 'button',
                 {
@@ -2096,7 +2108,7 @@ export class MapApp {
                       d.land!.colors = c
                     }),
                 },
-                '↺',
+                '\u21ba',
               )
             : h('span'),
         ),
@@ -2104,7 +2116,19 @@ export class MapApp {
     }
     body.append(h('h4', null, 'Biomes'), pal)
 
-    // Display (opacity is on the Land layer row).
+    // Old shapes painted as terrain.
+    const convertible = (p.features ?? []).filter((f) => this.convertibleShape(f))
+    if (convertible.length) {
+      body.append(
+        h('h4', null, 'From your shapes'),
+        h('div', { class: 'mt-dim' }, `${convertible.length} land, lake and terrain area shape${convertible.length === 1 ? '' : 's'} can become terrain: land as grassland with sea around it, then forests, deserts and the rest on top. The shapes are hidden, not deleted.`),
+        h('div', { class: 'mt-row' }, h('button', { class: 'mt-btn mt-primary', onclick: () => this.convertShapes() }, 'Paint shapes as terrain')),
+      )
+    }
+
+    if (!grid || !graph) return
+
+    // Display (opacity is on the Terrain layer row).
     const onTop = h('input', { type: 'checkbox', checked: this.map.imageOnTop, disabled: !p.image })
     onTop.addEventListener('change', () => {
       this.map.imageOnTop = onTop.checked
@@ -2116,9 +2140,14 @@ export class MapApp {
         d.land!.symbols = symbols.checked ? undefined : false
       }),
     )
+    const detail = h('select', { class: 'mt-select', title: 'How many cells: more means finer painting' })
+    const opts = DETAIL.some(([n]) => n === grid.cells) ? DETAIL : ([[grid.cells, 'Current'], ...DETAIL] as [number, string][])
+    for (const [n, label] of opts) detail.append(h('option', { value: String(n), selected: n === grid.cells }, `${label} (~${n.toLocaleString()} cells)`))
+    detail.addEventListener('change', () => this.mutate((d) => d.land && (d.land = resampleGrid(d.land, { ...d.land.bounds }, Number(detail.value)))))
     body.append(
       h('h4', null, 'Display'),
-      h('div', { class: 'mt-row mt-wrap' }, h('label', { class: 'mt-check' }, symbols, 'Terrain symbols'), h('label', { class: 'mt-check', title: 'Show the map picture above the land, at its own opacity' }, onTop, 'Picture on top')),
+      h('div', { class: 'mt-row mt-wrap' }, h('label', { class: 'mt-check' }, symbols, 'Terrain symbols'), h('label', { class: 'mt-check', title: 'Show the map picture above the terrain, at its own opacity' }, onTop, 'Picture on top')),
+      h('div', { class: 'mt-form' }, h('label', null, 'Detail'), detail),
     )
 
     body.append(this.landSeedBox(grid))
@@ -2133,6 +2162,7 @@ export class MapApp {
           'button',
           {
             class: `mt-btn${this.confirmRemoveLand ? ' mt-danger' : ' mt-ghost'}`,
+            title: 'Back to fully unpainted',
             onclick: () => {
               if (!this.confirmRemoveLand) {
                 this.confirmRemoveLand = true
@@ -2145,10 +2175,59 @@ export class MapApp {
               })
             },
           },
-          this.confirmRemoveLand ? 'Confirm remove' : 'Remove land grid',
+          this.confirmRemoveLand ? 'Confirm clear' : 'Clear terrain',
         ),
       ),
     )
+  }
+
+  /** A shape that "Paint shapes as terrain" understands. */
+  private convertibleShape(f: Feature): boolean {
+    if (f.geom !== 'area' || f.hidden) return false
+    if (f.layer === 'landmass') return f.type === 'land' || f.type === 'lake'
+    return f.layer === 'terrain' && f.type in SHAPE_BIOME
+  }
+
+  /** The shape (land, lake or terrain area) under a point, topmost first. */
+  private shapeAt(x: number, y: number): Feature | null {
+    const p = this.profile
+    if (!p?.features) return null
+    for (const layer of ['terrain', 'landmass'] as FeatureLayer[]) {
+      if (!layerSettings(p.layerSettings, layer).visible) continue
+      for (let i = p.features.length - 1; i >= 0; i--) {
+        const f = p.features[i]
+        if (f.layer === layer && f.geom === 'area' && !f.hidden && pointInRings(x, y, f.rings)) return f
+      }
+    }
+    return null
+  }
+
+  /** Paint land, lake and terrain area shapes into the terrain, then hide them. */
+  private convertShapes(): void {
+    const p = this.profile
+    if (!p) return
+    const shapes = (p.features ?? []).filter((f) => this.convertibleShape(f))
+    if (!shapes.length) return
+    const ids = new Set(shapes.map((f) => f.id))
+    this.mutate((d) => {
+      d.land ??= newGrid({ ...d.bounds }, DEFAULT_CELLS)
+      const g = graphFor(d.land)
+      const v = new Uint8Array(biomesOf(d.land, g))
+      const lands = shapes.filter((f) => f.layer === 'landmass' && f.type === 'land')
+      if (lands.length) {
+        const inLand = new Uint8Array(g.n)
+        for (const f of lands) for (const c of cellsInRings(g, f.rings)) inLand[c] = 1
+        for (let i = 0; i < g.n; i++) {
+          if (!inLand[i]) v[i] = OCEAN
+          else if (v[i] === EMPTY || isWater(v[i])) v[i] = DEFAULT_LAND
+        }
+      }
+      for (const f of shapes) if (f.layer === 'landmass' && f.type === 'lake') for (const c of cellsInRings(g, f.rings)) v[c] = LAKE
+      for (const f of shapes) if (f.layer === 'terrain') for (const c of cellsInRings(g, f.rings)) v[c] = SHAPE_BIOME[f.type]
+      d.land.biome = encodeBytes(v)
+      d.features = (d.features ?? []).map((f) => (ids.has(f.id) ? { ...f, hidden: true } : f))
+    })
+    this.warn(`Painted ${shapes.length} shapes as terrain. They're hidden in Features.`)
   }
 
   private landSeedBox(grid: NonNullable<WorldProfile['land']>): HTMLElement {
@@ -2268,14 +2347,36 @@ export class MapApp {
       })
       return
     }
+    if (tool === 'lpick') {
+      if (phase !== 'down') return
+      const b = this.map.land.biomeAt(grid, x, y)
+      if (b === null) return this.warn('Nothing painted there.')
+      this.landBiome = b
+      this.setTool(this.lastPaintTool)
+      return
+    }
     const target = this.landBiome
-    const allowed = (current: number) => !this.landKeepCoast || isWater(current) === isWater(target)
+    const allowed = (current: number) => !this.landKeepCoast || current === EMPTY || target === EMPTY || isWater(current) === isWater(target)
     if (tool === 'lfill') {
       if (phase !== 'down') return
       const values = new Uint8Array(biomesOf(grid, graph))
-      const start = findCell(graph, x, y)
-      if (values[start] === target) return
-      for (const c of floodCells(graph, values, start)) values[c] = target
+      const shape = this.landFillShapes && !e.shiftKey ? this.shapeAt(x, y) : null
+      let changed = 0
+      if (shape) {
+        for (const c of cellsInRings(graph, shape.rings))
+          if (values[c] !== target && allowed(values[c])) {
+            values[c] = target
+            changed++
+          }
+      } else {
+        const start = findCell(graph, x, y)
+        if (values[start] === target) return
+        for (const c of floodCells(graph, values, start)) {
+          values[c] = target
+          changed++
+        }
+      }
+      if (!changed) return
       this.mutate((d) => {
         d.land!.biome = encodeBytes(values)
       })
@@ -2329,6 +2430,25 @@ export class MapApp {
       this.warn(isWater(target) ? 'Keep coastline is on, so water only paints over water. Untick it to flood land.' : 'Keep coastline is on, so land only paints over land. Untick it to draw new land on the sea.')
   }
 
+  /** The lasso closed: paint the cells inside it. */
+  private onLandPolygon(pts: [number, number][]): void {
+    const grid = this.profile?.land
+    if (!grid) return
+    const graph = graphFor(grid)
+    const values = new Uint8Array(biomesOf(grid, graph))
+    const target = this.landBiome
+    let changed = 0
+    for (const c of cellsInRings(graph, [pts]))
+      if (values[c] !== target && (!this.landKeepCoast || values[c] === EMPTY || target === EMPTY || isWater(values[c]) === isWater(target))) {
+        values[c] = target
+        changed++
+      }
+    if (!changed) return this.warn('Nothing inside the lasso changed.')
+    this.mutate((d) => {
+      d.land!.biome = encodeBytes(values)
+    })
+  }
+
   private commitStroke(final: boolean): void {
     const stroke = this.landStroke
     if (!stroke || !this.profile?.land) return
@@ -2352,9 +2472,21 @@ export class MapApp {
       h(
         'div',
         { class: 'mt-dim' },
-        `Drawing on ${LAYER_LABEL[active]}. Select (V), Area (R), Line (L) and Spot (S) are on the left; the options bar picks the layer and what to draw. Choose another layer in the Layers panel.`,
+        `Rivers, roads, mountain ranges, landmarks and outlines, drawn on ${LAYER_LABEL[active]}. Select (V), Area (R), Line (L) and Spot (S) are on the left; the options bar picks the layer and what to draw. The ground itself is painted in Terrain.`,
       ),
     )
+    const hidden = fs.filter((f) => f.hidden)
+    if (hidden.length)
+      body.append(
+        h(
+          'div',
+          { class: 'mt-row mt-wrap' },
+          h('span', { class: 'mt-dim' }, `${hidden.length} shape${hidden.length === 1 ? ' is' : 's are'} hidden (painted as terrain).`),
+          h('button', { class: 'mt-btn mt-ghost', onclick: () => this.mutate((d) => (d.features = (d.features ?? []).map((f) => (f.hidden ? { ...f, hidden: undefined } : f)))) }, 'Show them'),
+        ),
+      )
+    if (fs.some((f) => this.convertibleShape(f)))
+      body.append(h('div', { class: 'mt-row' }, h('button', { class: 'mt-btn', title: 'Land, lake and terrain areas become painted terrain; the shapes are hidden', onclick: () => this.convertShapes() }, 'Paint shapes as terrain')))
 
     // Selection.
     const selected = fs.filter((f) => vec.selection.has(f.id))
@@ -2567,67 +2699,74 @@ export class MapApp {
     this.send({ type: 'setImage', profileId: p.id, dataUrl, width: img.naturalWidth, height: img.naturalHeight, mime: f.mimeType })
   }
 
-  /** Canvas size: how far the world extends. The land grid follows, keeping its painting. */
+  /**
+   * Canvas size, like an image editor's: width and height (always positive),
+   * kept centred where the canvas is now. The edges' coordinates are worked out
+   * here; the land grid follows on Apply, keeping its painting.
+   */
   private renderCanvasTab(body: HTMLElement): void {
     const p = this.profile!
     const d = (this.canvasDraft ??= { ...p.bounds })
-    const keys: [keyof Bounds, string][] = [
-      ['minX', 'Left (X min)'],
-      ['maxX', 'Right (X max)'],
-      ['minY', 'Bottom (Y min)'],
-      ['maxY', 'Top (Y max)'],
-    ]
-    const inputs = new Map<keyof Bounds, HTMLInputElement>()
-    const size = h('div', { class: 'mt-dim' })
+    const grid = p.land
+    const cx = (d.minX + d.maxX) / 2
+    const cy = (d.minY + d.maxY) / 2
+    let w = d.maxX - d.minX
+    let hh = d.maxY - d.minY
+    const ratio = hh > 0 && w > 0 ? hh / w : 1
+    const area = (b: Bounds) => Math.max(1e-9, (b.maxX - b.minX) * (b.maxY - b.minY))
+    const span = h('div', { class: 'mt-dim' })
     const landInfo = h('div', { class: 'mt-dim' })
     const apply = h('button', { class: 'mt-btn mt-primary' }, 'Apply')
     const detail = h('select', { class: 'mt-select' })
-    const grid = p.land
-    const area = (b: Bounds) => Math.max(1e-9, (b.maxX - b.minX) * (b.maxY - b.minY))
+    const wIn = h('input', { class: 'mt-input', type: 'number', min: '1', step: 'any', value: String(round2(w)) })
+    const hIn = h('input', { class: 'mt-input', type: 'number', min: '1', step: 'any', value: String(round2(hh)) })
+
     const refresh = () => {
-      for (const [k, el] of inputs) if (document.activeElement !== el) el.value = String(round2(d[k]))
-      const w = d.maxX - d.minX
-      const hh = d.maxY - d.minY
+      d.minX = cx - w / 2
+      d.maxX = cx + w / 2
+      d.minY = cy - hh / 2
+      d.maxY = cy + hh / 2
+      if (document.activeElement !== wIn) wIn.value = String(round2(w))
+      if (document.activeElement !== hIn) hIn.value = String(round2(hh))
       const ok = w > 0 && hh > 0
-      size.textContent = ok ? `${round2(w)} \u00d7 ${round2(hh)} units \u00b7 ${formatKm(w * p.unitKm)} \u00d7 ${formatKm(hh * p.unitKm)}` : 'Right must be greater than left, and top greater than bottom.'
       apply.disabled = !ok
+      span.textContent = ok ? `${formatKm(w * p.unitKm)} \u00d7 ${formatKm(hh * p.unitKm)}. Spans ${fmtBounds(d)}.` : 'Width and height must be above 0.'
       if (grid && ok) {
         // Same cell size as now, if that stays under the cap; otherwise the finest allowed.
         const same = Math.round((grid.cells * area(d)) / area(grid.bounds))
+        const first = Math.min(same, MAX_CELLS)
         const opts: [number, string][] = [
-          [Math.min(same, MAX_CELLS), same > MAX_CELLS ? `Finest allowed (${MAX_CELLS.toLocaleString()} cells)` : `Same cell size (~${same.toLocaleString()} cells)`],
-          ...DETAIL.filter(([n]) => n !== Math.min(same, MAX_CELLS)).map(([n, l]) => [n, `${l} (~${n.toLocaleString()} cells)`] as [number, string]),
+          [first, same > MAX_CELLS ? `Finest allowed (${MAX_CELLS.toLocaleString()} cells)` : `Same cell size (~${same.toLocaleString()} cells)`],
+          ...DETAIL.filter(([n]) => n !== first).map(([n, l]) => [n, `${l} (~${n.toLocaleString()} cells)`] as [number, string]),
         ]
-        const pick = this.canvasCells ?? opts[0][0]
+        const pick = this.canvasCells ?? first
         clear(detail)
         for (const [n, l] of opts) detail.append(h('option', { value: String(n), selected: n === pick }, l))
-        if (!opts.some(([n]) => n === pick)) detail.value = String(opts[0][0])
+        if (!opts.some(([n]) => n === pick)) detail.value = String(first)
         const cell = Math.sqrt(area(d) / Number(detail.value))
         const cut = d.minX > grid.bounds.minX || d.maxX < grid.bounds.maxX || d.minY > grid.bounds.minY || d.maxY < grid.bounds.maxY
         landInfo.textContent = `Cells about ${round2(cell)} units across. New area starts as ocean${cut ? '; land outside the new canvas is cut off' : ''}.`
       }
     }
-    const set = (k: keyof Bounds, v: number) => {
-      if (this.canvasLinked) {
-        const m = Math.abs(v)
-        d.minX = -m
-        d.maxX = m
-        d.minY = -m
-        d.maxY = m
-      } else d[k] = v
+    const read = (el: HTMLInputElement) => {
+      const v = numOrNull(el.value)
+      return v !== null && v > 0 ? Math.abs(v) : null
+    }
+    wIn.addEventListener('input', () => {
+      const v = read(wIn)
+      if (v === null) return
+      w = v
+      if (this.canvasLinked) hh = v * ratio
       refresh()
-    }
-    const fields: HTMLElement[] = []
-    for (const [k, label] of keys) {
-      const el = h('input', { class: 'mt-input', type: 'number', step: 'any', value: String(round2(d[k])) })
-      el.addEventListener('input', () => {
-        const v = numOrNull(el.value)
-        if (v !== null) set(k, v)
-      })
-      el.addEventListener('change', () => refresh())
-      inputs.set(k, el)
-      fields.push(h('label', null, label), el)
-    }
+    })
+    hIn.addEventListener('input', () => {
+      const v = read(hIn)
+      if (v === null) return
+      hh = v
+      if (this.canvasLinked) w = v / ratio
+      refresh()
+    })
+    for (const el of [wIn, hIn]) el.addEventListener('change', () => refresh())
     detail.addEventListener('change', () => {
       this.canvasCells = Number(detail.value)
       refresh()
@@ -2643,27 +2782,32 @@ export class MapApp {
       this.dialog = null
       this.renderSide(true)
       this.map.fit()
-      this.warn(`Canvas is now ${fmtBounds(bounds)}.`)
+      this.warn(`Canvas is now ${round2(bounds.maxX - bounds.minX)} \u00d7 ${round2(bounds.maxY - bounds.minY)}.`)
     })
     const link = h(
       'button',
       {
-        class: `mt-btn${this.canvasLinked ? ' mt-on' : ''}`,
-        title: this.canvasLinked ? 'Linked: every edge mirrors the one you change (1000 gives -1000 to 1000 both ways)' : 'Edges change independently',
+        class: `mt-btn mt-icon-btn mt-link-btn${this.canvasLinked ? ' mt-on' : ''}`,
+        title: this.canvasLinked ? 'Proportions linked: changing one changes the other' : 'Width and height change separately',
         onclick: () => {
           this.canvasLinked = !this.canvasLinked
-          if (this.canvasLinked) set('maxX', Math.max(Math.abs(d.minX), Math.abs(d.maxX), Math.abs(d.minY), Math.abs(d.maxY)))
           this.renderSide(true)
         },
       },
       icon(this.canvasLinked ? 'link' : 'unlink'),
-      this.canvasLinked ? 'Linked' : 'Unlinked',
     )
     body.append(
-      h('div', { class: 'mt-dim' }, 'How far the world extends, in map units. Points, zones and shapes keep their coordinates; the picture keeps its calibration.'),
-      h('div', { class: 'mt-row' }, link, h('span', { class: 'mt-dim' }, this.canvasLinked ? 'Square around 0: change one edge, the rest follow' : 'Each edge on its own')),
-      h('div', { class: 'mt-form' }, ...fields),
-      size,
+      h('div', { class: 'mt-dim' }, 'How big the world is, in map units. It grows or shrinks around its centre. Places, zones and shapes stay where they are.'),
+      h(
+        'div',
+        { class: 'mt-canvas-size' },
+        h('label', null, 'Width'),
+        wIn,
+        link,
+        h('label', null, 'Height'),
+        hIn,
+      ),
+      span,
       h(
         'div',
         { class: 'mt-row mt-wrap' },
@@ -2671,10 +2815,9 @@ export class MapApp {
           'button',
           {
             class: 'mt-btn mt-ghost',
-            title: 'Just big enough for every point, zone and shape',
+            title: 'Just big enough for every place, zone and shape',
             onclick: () => {
               Object.assign(d, boundsOf(p))
-              this.canvasLinked = false
               this.renderSide(true)
             },
           },
@@ -2696,7 +2839,7 @@ export class MapApp {
     if (grid)
       body.append(
         h('h4', null, 'Land grid'),
-        h('div', { class: 'mt-dim' }, `Now ${grid.cells.toLocaleString()} cells over ${fmtBounds(grid.bounds)}. It is rebuilt over the new canvas with your painting kept.`),
+        h('div', { class: 'mt-dim' }, `Rebuilt over the new canvas with your painting kept. Now ${grid.cells.toLocaleString()} cells.`),
         h('div', { class: 'mt-form' }, h('label', null, 'Detail'), detail),
         landInfo,
       )

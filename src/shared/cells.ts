@@ -20,6 +20,10 @@ export interface Biome {
 export const OCEAN = 0
 export const LAKE = 13
 export const DEFAULT_LAND = 4
+/** Not painted yet: see-through, so the picture and shapes show until you paint. */
+export const EMPTY = 255
+/** Cells in a new terrain grid. */
+export const DEFAULT_CELLS = 20000
 
 /** Fantasy Map Generator's default biomes, plus lake, mountains and hills. */
 export const BIOMES: Biome[] = [
@@ -44,11 +48,15 @@ export const BIOMES: Biome[] = [
 
 export const isWater = (b: number): boolean => b === OCEAN || b === LAKE
 
+export const isPainted = (b: number): boolean => b !== EMPTY
+
 export function biomeName(id: number, grid?: LandGrid | null): string {
+  if (id === EMPTY) return 'Unpainted'
   return grid?.names?.[id] ?? BIOMES[id]?.name ?? `Biome ${id}`
 }
 
 export function biomeColor(id: number, grid?: LandGrid | null): string {
+  if (id === EMPTY) return 'transparent'
   return grid?.colors?.[id] ?? BIOMES[id]?.color ?? '#888888'
 }
 
@@ -342,15 +350,45 @@ export function biomesOf(grid: LandGrid, g: Graph): Uint8Array {
   return a
 }
 
-/** A new, all-ocean grid over `bounds`. */
-export function newGrid(bounds: Bounds, cells: number, seed = Math.floor(Math.random() * 2 ** 31)): LandGrid {
+/** A new grid over `bounds`, every cell `fill` (unpainted unless told otherwise). */
+export function newGrid(bounds: Bounds, cells: number, seed = Math.floor(Math.random() * 2 ** 31), fill = EMPTY): LandGrid {
   const g = buildGraph(bounds, cells, seed)
-  return { v: 1, bounds, cells, seed, biome: encodeBytes(new Uint8Array(g.n)) }
+  return { v: 1, bounds, cells, seed, biome: encodeBytes(new Uint8Array(g.n).fill(fill)) }
+}
+
+/** Cells whose centre lies inside the rings (even-odd, so holes stay out). */
+export function cellsInRings(g: Graph, rings: [number, number][][]): number[] {
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const r of rings)
+    for (const [x, y] of r) {
+      if (x < minX) minX = x
+      if (x > maxX) maxX = x
+      if (y < minY) minY = y
+      if (y > maxY) maxY = y
+    }
+  const out: number[] = []
+  for (let i = 0; i < g.n; i++) {
+    const x = g.points[2 * i]
+    const y = g.points[2 * i + 1]
+    if (x < minX || x > maxX || y < minY || y > maxY) continue
+    let inside = false
+    for (const r of rings)
+      for (let a = 0, b = r.length - 1; a < r.length; b = a++) {
+        const [xa, ya] = r[a]
+        const [xb, yb] = r[b]
+        if (ya > y !== yb > y && x < ((xb - xa) * (y - ya)) / (yb - ya) + xa) inside = !inside
+      }
+    if (inside) out.push(i)
+  }
+  return out
 }
 
 /**
  * The same painting over new bounds: a fresh grid where each cell takes the
- * biome under it in the old grid, and anything outside the old bounds is ocean.
+ * biome under it in the old grid, and anything outside the old bounds is unpainted.
  */
 export function resampleGrid(old: LandGrid, bounds: Bounds, cells: number): LandGrid {
   const g0 = graphFor(old)
@@ -362,7 +400,7 @@ export function resampleGrid(old: LandGrid, bounds: Bounds, cells: number): Land
   for (let i = 0; i < g1.n; i++) {
     const x = g1.points[2 * i]
     const y = g1.points[2 * i + 1]
-    out[i] = x >= ob.minX && x <= ob.maxX && y >= ob.minY && y <= ob.maxY ? b0[findCell(g0, x, y)] : OCEAN
+    out[i] = x >= ob.minX && x <= ob.maxX && y >= ob.minY && y <= ob.maxY ? b0[findCell(g0, x, y)] : EMPTY
   }
   return { ...old, bounds: { ...bounds }, cells: next.cells, seed: next.seed, biome: encodeBytes(out) }
 }

@@ -18,8 +18,8 @@ import { VectorEditor, isVectorTool, type VectorTool } from './vector'
 import { LandRenderer } from './landmap'
 import { biomeName } from '../shared/cells'
 
-export type LandTool = 'lbrush' | 'lfill' | 'lsample'
-export const isLandTool = (t: string): t is LandTool => t === 'lbrush' || t === 'lfill' || t === 'lsample'
+export type LandTool = 'lbrush' | 'lfill' | 'llasso' | 'lpick' | 'lsample'
+export const isLandTool = (t: string): t is LandTool => t === 'lbrush' || t === 'lfill' || t === 'llasso' || t === 'lpick' || t === 'lsample'
 export type Tool = 'pan' | 'me' | 'dest' | 'add' | 'measure' | 'crop' | 'zone' | 'imgxf' | 'pmove' | VectorTool | LandTool
 type CropMode = 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
 
@@ -71,6 +71,8 @@ export interface MapHooks {
   onSelectPoi(poi: Poi | null): void
   /** Land tools: `down` on press, `move` while dragging (brush only), `end` on release. */
   onLand(tool: LandTool, phase: 'down' | 'move' | 'end', x: number, y: number, e: { altKey: boolean; shiftKey: boolean }): void
+  /** The lasso closed: paint everything inside this outline (world coordinates). */
+  onLandPolygon(points: [number, number][]): void
   /** A place dragged (or nudged) with the Move places tool. `move` while dragging, `end` once dropped. */
   onPoiMove(id: string, x: number, y: number, phase: 'move' | 'end'): void
   onContextMenu(x: number, y: number, poi: Poi | null, clientX: number, clientY: number): void
@@ -131,6 +133,8 @@ export class MapView {
   /** Draw the map picture above the land grid (for comparing while painting or seeding). */
   imageOnTop = false
   landOpacity = 1
+  /** Outline being drawn with the terrain lasso, in world coordinates. */
+  private lasso: [number, number][] | null = null
 
   private view: View = { cx: 0, cy: 0, s: 1 }
   private w = 0
@@ -514,7 +518,8 @@ export class MapView {
       if (isLandTool(this.tool) && this.profile?.land) {
         const w = this.toWorld(p.x, p.y)
         this.gesture = { ...base, mode: 'land' }
-        this.hooks.onLand(this.tool, 'down', w.x, w.y, e)
+        if (this.tool === 'llasso') this.lasso = [[w.x, w.y]]
+        else this.hooks.onLand(this.tool, 'down', w.x, w.y, e)
         return
       }
       if (this.tool === 'pmove') {
@@ -569,6 +574,15 @@ export class MapView {
           const w = this.toWorld(p.x, p.y)
           this.hooks.onLand(this.tool, 'move', w.x, w.y, e)
         }
+        if (this.lasso) {
+          const last = this.lasso[this.lasso.length - 1]
+          const ls = this.toScreen(last[0], last[1])
+          if (Math.hypot(ls.x - p.x, ls.y - p.y) >= 4) {
+            const w = this.toWorld(p.x, p.y)
+            this.lasso.push([w.x, w.y])
+            this.invalidate()
+          }
+        }
         this.updateHover(p.x, p.y)
         return
       }
@@ -614,7 +628,12 @@ export class MapView {
       }
       if (g.mode === 'land') {
         const w = this.toWorld(p.x, p.y)
-        if (isLandTool(this.tool)) this.hooks.onLand(this.tool, 'end', w.x, w.y, e)
+        const lasso = this.lasso
+        this.lasso = null
+        if (lasso) {
+          if (lasso.length >= 3) this.hooks.onLandPolygon(lasso)
+          this.invalidate()
+        } else if (isLandTool(this.tool)) this.hooks.onLand(this.tool, 'end', w.x, w.y, e)
         this.updateHover(p.x, p.y)
         return
       }
@@ -920,6 +939,22 @@ export class MapView {
         this.drawDragRect(t)
       }
       this.vec.drawOverlay(this.g, colors, this.tool)
+      if (this.lasso && this.lasso.length > 1) {
+        g.beginPath()
+        this.lasso.forEach(([x, y], i) => {
+          const s = this.toScreen(x, y)
+          if (i) g.lineTo(s.x, s.y)
+          else g.moveTo(s.x, s.y)
+        })
+        g.closePath()
+        g.fillStyle = 'rgba(255,255,255,0.12)'
+        g.fill()
+        g.strokeStyle = t.text
+        g.lineWidth = 1.5
+        g.setLineDash([5, 4])
+        g.stroke()
+        g.setLineDash([])
+      }
       if (this.tool === 'lbrush' && this.hover && p.land) {
         g.beginPath()
         g.arc(this.hover.sx, this.hover.sy, this.brushPx, 0, Math.PI * 2)

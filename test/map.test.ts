@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import manifest from '../spindle.json'
 import { movePoint, placeRef, placesVarName, placesVarValue, revertPoint } from '../src/shared/places'
 import { applyRefs, findCoords, guessName, resolveRefs } from '../src/shared/convert'
-import { DEFAULT_LAND, LAKE, OCEAN, biomesOf, buildGraph, dropSmallRegions, encodeBytes, findCell, floodCells, graphFor, isWater, newGrid, regionRings, resampleGrid, smoothCells } from '../src/shared/cells'
+import { DEFAULT_LAND, LAKE, OCEAN, biomesOf, buildGraph, dropSmallRegions, encodeBytes, findCell, floodCells, graphFor, isWater, newGrid, regionRings, resampleGrid, smoothCells, cellsInRings, EMPTY } from '../src/shared/cells'
 import {
   bearing,
   buildContext,
@@ -567,7 +567,7 @@ describe('land grid', () => {
     expect(smoothCells(g, v, 1).some((b) => b !== OCEAN)).toBe(false)
   })
 
-  it('resizes the canvas keeping the painting, with new area as ocean', () => {
+  it('resizes the canvas keeping the painting, with new area unpainted', () => {
     const grid = newGrid({ minX: -100, maxX: 100, minY: -100, maxY: 100 }, 6000, 7)
     const g = graphFor(grid)
     const v = new Uint8Array(g.n)
@@ -578,7 +578,19 @@ describe('land grid', () => {
     const g2 = graphFor(big)
     const b2 = biomesOf(big, g2)
     expect(b2[findCell(g2, 0, 0)]).toBe(DEFAULT_LAND)
-    expect(b2[findCell(g2, 500, 500)]).toBe(OCEAN)
+    expect(b2[findCell(g2, 500, 500)]).toBe(EMPTY)
     expect(b2[findCell(g2, 0, 80)]).toBe(OCEAN)
+  })
+
+  it('starts unpainted and paints the cells inside an outline, minding holes', () => {
+    const grid = newGrid({ minX: -100, maxX: 100, minY: -100, maxY: 100 }, 6000, 3)
+    const g = graphFor(grid)
+    expect(biomesOf(grid, g).every((b) => b === EMPTY)).toBe(true)
+    const outer: [number, number][] = [[-50, -50], [50, -50], [50, 50], [-50, 50]]
+    const hole: [number, number][] = [[-10, -10], [10, -10], [10, 10], [-10, 10]]
+    const inside = new Set(cellsInRings(g, [outer, hole]))
+    expect(inside.has(findCell(g, 30, 30))).toBe(true)
+    expect(inside.has(findCell(g, 0, 0))).toBe(false)
+    expect(inside.has(findCell(g, 80, 80))).toBe(false)
   })
 })

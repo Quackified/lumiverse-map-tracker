@@ -87,6 +87,7 @@ export const CSS = `
 .mt-opt-range { width: 120px; }
 .mt-opt-hint { flex: 1 1 240px; min-width: 0; color: var(--mt-muted); font-size: 11.5px; line-height: 1.35; }
 .mt-swatch { width: 14px; height: 14px; flex: none; border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.35); }
+.mt-swatch-empty { background: repeating-conic-gradient(rgba(255,255,255,0.35) 0 25%, transparent 0 50%) 0 0 / 8px 8px; margin: 0 3px; }
 .mt-seg.mt-menus .mt-btn { width: auto; padding: 0 8px; }
 .mt-narrow .mt-btn-label { display: none; }
 .mt-grid {
@@ -172,6 +173,9 @@ export const CSS = `
   background: var(--mt-elev); border: 1px solid var(--mt-border); border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,0.45);
 }
 .mt-dialog[hidden] { display: none; }
+.mt-canvas-size { display: grid; grid-template-columns: 54px minmax(0, 1fr) 30px; grid-template-rows: auto auto; gap: 6px 6px; align-items: center; margin: 10px 0 6px; }
+.mt-canvas-size > label { color: var(--mt-muted); font-size: 11.5px; }
+.mt-canvas-size .mt-link-btn { grid-column: 3; grid-row: 1 / 3; height: 100%; width: 28px; }
 .mt-app[data-side="false"] .mt-dialog, .mt-narrow .mt-dialog { right: 10px; width: min(430px, calc(100% - 20px)); }
 .mt-tabs { display: flex; flex: none; flex-wrap: wrap; border-bottom: 1px solid var(--mt-border); }
 .mt-tab { flex: none; padding: 8px 10px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--mt-muted); font: inherit; font-size: 12px; cursor: pointer; }

@@ -131,6 +131,24 @@ export const CSS = `
   display: grid; gap: 6px; border-radius: 10px; background: var(--mt-elev); border: 1px solid var(--mt-border); box-shadow: 0 12px 30px rgba(0,0,0,0.4); font-size: 12.5px;
 }
 .mt-card[hidden] { display: none; }
+.mt-search {
+  position: absolute; z-index: 21; top: 8px; left: 50%; transform: translateX(-50%); width: min(380px, calc(100% - 16px));
+  display: grid; gap: 4px; padding: 6px; border-radius: 10px; background: var(--mt-elev); border: 1px solid var(--mt-border); box-shadow: 0 12px 30px rgba(0,0,0,0.4);
+}
+.mt-search[hidden] { display: none; }
+.mt-marker { width: 16px; height: 16px; flex-shrink: 0; }
+.mt-group > summary { display: flex; align-items: center; }
+.mt-style-btn { padding: 2px; min-width: 0; }
+.mt-style-btn img, .mt-shape-row img { width: 16px; height: 16px; display: block; }
+.mt-style-box { display: grid; gap: 6px; margin: 4px 0 6px; padding: 7px 8px; border-radius: 7px; background: var(--mt-fill-subtle); }
+.mt-shape-row { display: flex; flex-wrap: wrap; gap: 3px; }
+.mt-search .mt-row { gap: 6px; padding: 0 4px; }
+.mt-search .mt-input { flex: 1; }
+.mt-search-list { display: grid; max-height: 320px; overflow-y: auto; }
+.mt-search-item { display: flex; justify-content: space-between; gap: 10px; padding: 6px 8px; border: 0; border-radius: 6px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.mt-search-item:hover, .mt-search-item.mt-on { background: var(--mt-fill-subtle); }
+.mt-search-item .mt-dim { flex-shrink: 0; font-size: 11.5px; }
+.mt-search-none { padding: 6px 8px; }
 .mt-card-head { display: flex; align-items: flex-start; gap: 8px; }
 .mt-card-title { flex: 1; min-width: 0; display: grid; line-height: 1.3; }
 .mt-card-title b { font-size: 14px; }

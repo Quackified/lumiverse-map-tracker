@@ -11,9 +11,19 @@ export interface Poi {
   group: string
   note?: string
   color?: string
+  /** Marker shape; unset uses the group's style. */
+  shape?: MarkerShape
   hidden?: boolean
   /** Where the lorebook/import put this place, set once it has been moved on the map. */
   origin?: { x: number; y: number }
+}
+
+export type MarkerShape = 'dot' | 'square' | 'diamond' | 'triangle' | 'star' | 'shield' | 'castle' | 'anchor' | 'skull'
+
+/** How a group's places look; subgroups inherit what they don't set. */
+export interface GroupStyle {
+  shape?: MarkerShape
+  color?: string
 }
 
 /** One axis of a zone. `null` means open on that side (e.g. "Y>150" → { min: 150, max: null }). */
@@ -173,6 +183,8 @@ export interface WorldProfile {
   /** Landmass, topography, terrain and prop shapes. */
   features?: Feature[]
   layerSettings?: Partial<Record<FeatureLayer, LayerSettings>>
+  /** Marker styles by place group path ("Eastern Continent / Eracia Empire"). */
+  groupStyles?: Record<string, GroupStyle>
   image?: MapImageMeta
   /** Crop/calibration from an imported map file, applied when an image of the same size is uploaded. */
   imageTemplate?: MapImageMeta

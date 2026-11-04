@@ -606,6 +606,12 @@ export class VectorEditor {
 
   /** Topmost editable feature under a screen point. */
   featureAt(sx: number, sy: number, includeLocked = false): Feature | null {
+    return this.featuresAt(sx, sy, includeLocked)[0] ?? null
+  }
+
+  /** Every editable feature under a screen point, topmost first. */
+  featuresAt(sx: number, sy: number, includeLocked = false): Feature[] {
+    const out: Feature[] = []
     const fs = this.features()
     const world = this.host.toWorld(sx, sy)
     for (const layer of [...LAYER_ORDER].reverse()) {
@@ -618,14 +624,31 @@ export class VectorEditor {
           if (f.layer !== layer || f.geom !== geom || f.hidden) continue
           if (geom === 'spot') {
             const s = this.host.toScreen(f.rings[0][0][0], f.rings[0][0][1])
-            if (Math.hypot(s.x - sx, s.y - sy) <= 9 * (f.size ?? 1) + 3) return f
+            if (Math.hypot(s.x - sx, s.y - sy) <= 9 * (f.size ?? 1) + 3) out.push(f)
           } else if (geom === 'line') {
-            if (this.nearRing(this.screenRing(f.rings[0]), sx, sy, false, 7)) return f
-          } else if (pointInRings(world.x, world.y, f.rings) || f.rings.some((r) => this.nearRing(this.screenRing(r), sx, sy, true, 4))) return f
+            if (this.nearRing(this.screenRing(f.rings[0]), sx, sy, false, 7)) out.push(f)
+          } else if (pointInRings(world.x, world.y, f.rings) || f.rings.some((r) => this.nearRing(this.screenRing(r), sx, sy, true, 4))) out.push(f)
         }
       }
     }
-    return null
+    return out
+  }
+
+  /** Editable features lying wholly inside a world rectangle. */
+  featuresIn(r: Bounds): Feature[] {
+    return this.features().filter((f) => this.editable(f) && f.rings.every((ring) => ring.every(([x, y]) => x >= r.minX && x <= r.maxX && y >= r.minY && y <= r.maxY)))
+  }
+
+  /** Whether a press here grabs a scale handle or a vertex of the selection (the editor then takes it). */
+  grabsEdit(sx: number, sy: number): boolean {
+    if (this.selection.size && this.handleAt(sx, sy)) return true
+    const one = this.single()
+    return !!(one && this.editable(one) && this.showVertices(one) && this.vertexAt(one, sx, sy))
+  }
+
+  /** Select features without telling the host (it is choosing them). */
+  choose(ids: string[]): void {
+    this.setSelection(ids)
   }
 
   private vertexAt(f: Feature, sx: number, sy: number): { ri: number; vi: number } | null {

@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --lumiverse-bg: #121419; --lumiverse-bg-elevated: #1a1d24; --lumiverse-text: #e6e7ea; --lumiverse-text-muted: #969cab;
+    --lumiverse-border: rgba(255,255,255,0.1); --lumiverse-primary: #7c9cff; --lumiverse-accent: #f2b544;
+    --lumiverse-fill: rgba(255,255,255,0.08); --lumiverse-fill-subtle: rgba(255,255,255,0.045); --lumiverse-radius: 10px;
+  }
+  html, body { margin: 0; height: 100%; background: #0c0d10; font-family: system-ui, sans-serif; }
+  #chat { position: absolute; inset: 0 0 0 0; color: #555; padding: 20px; }
+  #sidebar { position: absolute; left: -9999px; }
+  #col { position: absolute; left: 50%; transform: translateX(-50%); width: 640px; top: 0; bottom: 0; background: #16181d; padding: 16px; box-sizing: border-box; }
+  .bubble { background: #22252c; color: #bbb; padding: 10px; border-radius: 10px; margin: 8px 0; width: 70%; }
+  .bubble.me { margin-left: auto; }
+  #composer { position: absolute; left: 16px; right: 16px; bottom: 16px; width: calc(100% - 32px); }
+</style>
+</head>
+<body>
+<div id="chat"><div id="col"><div class="bubble">Character: The road south is long.</div><div class="bubble me">You: Keep going to the port.</div><textarea id="composer" rows="2"></textarea></div></div>
+<div id="sidebar"></div>
+<script type="module" src="bundle.js"></script>
+</body>
+</html>

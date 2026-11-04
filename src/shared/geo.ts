@@ -255,33 +255,35 @@ export function buildContext(
 ): string {
   if (!profile || !chat?.pos) return ''
   const { x, y } = chat.pos
+  // Wrapped in XML tags so the model reads it as structured, authoritative state.
+  const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const attr = (t: string) => esc(t).replace(/"/g, '&quot;')
   const where = locate(profile, x, y)
-  const lines: string[] = [`[Map: ${profile.name}]`]
-  const place = [where.zone && `zone ${where.zone.name}`, where.region && `region ${where.region.name}`]
-    .filter(Boolean)
-    .join(', ')
-  lines.push(`Current position: ${formatCoord(x, y, 1)}${place ? ` (${place})` : ''}.`)
-
-  if (settings.describeTerrain !== false) lines.push(...describeSurroundings(profile, x, y))
-
   const near = nearest(profile, x, y, settings.nearbyCount)
-  if (near.length) {
-    const parts = near.map((n) => (n.units < 0.5 ? `${n.poi.name} (here)` : `${n.poi.name} ${formatKm(n.km)} ${n.dir}`))
-    lines.push(`Nearby: ${parts.join('; ')}.`)
-  }
+  const at = near.find((n) => n.units < 0.5)
+  const place = [at && `at ${at.poi.name}`, where.zone && `zone ${where.zone.name}`, where.region && `region ${where.region.name}`].filter(Boolean).join(', ')
+  const lines: string[] = [`<map_context map="${attr(profile.name)}">`]
+  lines.push(`<current_position>${formatCoord(x, y, 1)}${place ? ` (${esc(place)})` : ''}</current_position>`)
+
+  const around = settings.describeTerrain !== false ? describeSurroundings(profile, x, y) : []
+  if (around.length) lines.push('<surroundings>', ...around.map(esc), '</surroundings>')
+
+  const others = near.filter((n) => n !== at)
+  if (others.length) lines.push(`<nearby_places>${esc(others.map((n) => `${n.poi.name} ${formatKm(n.km)} ${n.dir}`).join('; '))}</nearby_places>`)
 
   if (chat.dest) {
     const d = chat.dest
     const km = distanceUnits(x, y, d.x, d.y) * profile.unitKm
-    lines.push(`Destination: ${d.name} ${formatCoord(d.x, d.y)}, ${formatKm(km)} ${compass(bearing(x, y, d.x, d.y))}.`)
+    lines.push(`<destination>${esc(d.name)} ${formatCoord(d.x, d.y)}, ${formatKm(km)} ${compass(bearing(x, y, d.x, d.y))}</destination>`)
   }
 
-  lines.push(`Scale: 1 unit = ${profile.unitKm} km; +X east, +Y north.`)
+  lines.push(`<scale>1 unit = ${profile.unitKm} km; +X east, +Y north</scale>`)
   if (settings.askReport) {
     lines.push(
-      'When the travelling party moves to a new location, append <map-pos>x,y</map-pos> with the new coordinates at the very end of the reply. Omit it otherwise.',
+      '<position_updates>When the travelling party moves to a new location, append <map-pos>x,y</map-pos> with the new coordinates at the very end of the reply. Omit it otherwise.</position_updates>',
     )
   }
+  lines.push('</map_context>')
   return lines.join('\n')
 }
 

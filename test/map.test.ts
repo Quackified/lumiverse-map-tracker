@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test'
+import { editableCopy } from '../src/ui/cow'
 import { existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import manifest from '../spindle.json'
@@ -300,8 +301,10 @@ describe('geo', () => {
       { chatId: 'c', profileId: 'test', pos: { x: -265, y: 150 }, dest: { name: 'New Hope Port', x: -205, y: -45 }, trail: [] },
       { nearbyCount: 2, askReport: true },
     )
-    expect(text).toContain('Current position: [-265, 150] (zone Dark Domain, region Western Continent (Yanzhou))')
-    expect(text).toContain('Destination: New Hope Port [-205, -45], 10,200 km SSE.')
+    expect(text.startsWith('<map_context map="')).toBe(true)
+    expect(text.endsWith('</map_context>')).toBe(true)
+    expect(text).toContain('<current_position>[-265, 150] (zone Dark Domain, region Western Continent (Yanzhou))</current_position>')
+    expect(text).toContain('<destination>New Hope Port [-205, -45], 10,200 km SSE</destination>')
     expect(text).toContain('<map-pos>x,y</map-pos>')
     expect(buildContext(p, { chatId: 'c', profileId: 'test', pos: null, dest: null, trail: [] }, { nearbyCount: 2, askReport: false })).toBe('')
   })
@@ -659,3 +662,40 @@ describe('surroundings', () => {
   })
 })
 
+
+describe('editableCopy', () => {
+  const base = () =>
+    ({ id: 'm', name: 'M', unitKm: 1, bounds: { minX: 0, maxX: 10, minY: 0, maxY: 10 }, points: [{ id: 'a', name: 'A', x: 1, y: 1, group: '' }], zones: [], decor: [{ t: 'ink-peak', x: 1, y: 1, s: 1, r: 1 }], updatedAt: 0 }) as unknown as import('../src/shared/types').WorldProfile
+  it('shares parts the edit never touches', () => {
+    const prev = base()
+    const { draft, done } = editableCopy(prev)
+    draft.name = 'N'
+    const next = done()
+    expect(next.name).toBe('N')
+    expect(prev.name).toBe('M')
+    expect(next.decor).toBe(prev.decor)
+    expect(next.points).toBe(prev.points)
+  })
+  it('copies a part on first touch, leaving the original alone', () => {
+    const prev = base()
+    const { draft, done } = editableCopy(prev)
+    draft.points[0].x = 5
+    draft.points.push({ id: 'b', name: 'B', x: 2, y: 2, group: '' })
+    const next = done()
+    expect(prev.points.length).toBe(1)
+    expect(prev.points[0].x).toBe(1)
+    expect(next.points.map((q) => q.x)).toEqual([5, 2])
+    expect(next.decor).toBe(prev.decor)
+  })
+  it('handles setting, deleting and adding parts', () => {
+    const prev = base()
+    const { draft, done } = editableCopy(prev)
+    delete draft.decor
+    draft.features = []
+    const next = done()
+    expect('decor' in next).toBe(false)
+    expect(next.features).toEqual([])
+    expect(prev.decor?.length).toBe(1)
+    expect(JSON.parse(JSON.stringify(next)).points.length).toBe(1)
+  })
+})

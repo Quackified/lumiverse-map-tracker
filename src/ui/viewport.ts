@@ -16,7 +16,8 @@ import type { Bounds, Calibration, ChatMapState, DecorStamp, LandGrid, Feature, 
 import { clear, h, hueOf } from './dom'
 import { VectorEditor, isVectorTool, type VectorTool } from './vector'
 import { LandRenderer } from './landmap'
-import { DecorRenderer } from './decor'
+import { DecorRenderer, stampBox, stampsAt } from './decor'
+import { drawMarker, markerStyle } from './markers'
 import { EMPTY, biomeColor, biomeName, graphFor } from '../shared/cells'
 
 export type LandTool = 'lbrush' | 'lfill' | 'llasso' | 'lpick' | 'lsample' | 'lwand' | 'lcoast'
@@ -85,8 +86,32 @@ export interface MapHooks {
   onLandPolygon(points: [number, number][]): void
   /** A place dragged (or nudged) with the Move places tool. `move` while dragging, `end` once dropped. */
   onPoiMove(id: string, x: number, y: number, phase: 'move' | 'end'): void
+  /**
+   * The Select tool moved its selection: new place positions, the shapes
+   * list with moved shapes, and (on `end` only) the decorations list with
+   * moved stamps; null where nothing of that kind moved.
+   */
+  onMoveSelection(m: { pois: { id: string; x: number; y: number }[]; features: Feature[] | null; decor: DecorStamp[] | null }, phase: 'move' | 'end'): void
+  /** Delete what the Select tool has selected. */
+  onDeleteSelection(s: { pois: string[]; decor: number[]; features: string[] }): void
+  /** What the Select tool has selected changed. */
+  onSelectionChange(): void
+  /** A plain click with the hand on a named or noted shape (no place there); null on empty map. */
+  onInspectShape(f: Feature | null): void
   onContextMenu(x: number, y: number, poi: Poi | null, clientX: number, clientY: number): void
   onToolDone(): void
+}
+
+/** Something the Select tool can pick. */
+export type Hit = { kind: 'poi'; id: string } | { kind: 'feature'; id: string } | { kind: 'decor'; i: number }
+const sameHit = (a: Hit, b: Hit) => a.kind === b.kind && (a.kind === 'decor' ? a.i === (b as { i: number }).i : a.id === (b as { id: string }).id)
+
+interface SelDrag {
+  world: { x: number; y: number }
+  ref: [number, number]
+  pois: { id: string; x: number; y: number }[]
+  decor: { i: number; st: DecorStamp }[]
+  feats: Feature[]
 }
 
 interface View {
@@ -162,7 +187,7 @@ export class MapView {
   private dragRect: { a: { x: number; y: number }; b: { x: number; y: number } } | null = null
   private pointers = new Map<number, { x: number; y: number }>()
   private gesture: {
-    mode: 'pan' | 'rect' | 'pinch' | 'crop' | 'imgxf' | 'vector' | 'poi' | 'land' | 'decor'
+    mode: 'pan' | 'rect' | 'pinch' | 'crop' | 'imgxf' | 'vector' | 'poi' | 'land' | 'decor' | 'sel' | 'box'
     sx: number
     sy: number
     moved: boolean
@@ -177,7 +202,14 @@ export class MapView {
     poiId?: string
     /** Grab offset: place position minus the pointer's world position. */
     grab?: { x: number; y: number }
+    /** Select tool: what is being dragged, as it was at the press. */
+    sel?: SelDrag
+    /** Select tool box: Shift adds to the selection. */
+    additive?: boolean
   } | null = null
+  /** Places and decorations picked with the Select tool (shapes are in `vec.selection`). */
+  readonly selPois = new Set<string>()
+  readonly selDecor = new Set<number>()
   /** Space held: drag pans whatever the tool. */
   private spaceDown = false
   readonly vec: VectorEditor
@@ -191,6 +223,8 @@ export class MapView {
    * once the view settles, or when the terrain or decorations change.
    */
   private base: { land: HTMLCanvasElement; decor: HTMLCanvasElement; view: View; margin: number; landKey: unknown[]; decorKey: unknown[] } | null = null
+  /** Decorations being dragged with the Select tool, drawn live above the cache. */
+  private liveStamps: DecorStamp[] | null = null
   /** World areas an eraser stroke changed since the last frame. */
   private eraseAreas: Bounds[] = []
   private baseDirty = true
@@ -249,7 +283,7 @@ export class MapView {
     this.bind()
   }
 
-  snapWorld(x: number, y: number, mods: { ctrlKey: boolean; metaKey: boolean }, exclude?: Set<string>): { x: number; y: number } {
+  snapWorld(x: number, y: number, mods: { ctrlKey: boolean; metaKey: boolean }, exclude?: Set<string>, excludePois?: Set<string>): { x: number; y: number } {
     this.snapMark = null
     if (!this.snapOn || mods.ctrlKey || mods.metaKey || !this.profile) return { x, y }
     // Objects first: a place or a shape point within 9 pixels.
@@ -257,6 +291,7 @@ export class MapView {
     let best = r
     let hit: { x: number; y: number } | null = null
     for (const pt of this.profile.points) {
+      if (excludePois?.has(pt.id)) continue
       const d = Math.hypot(pt.x - x, pt.y - y)
       if (d < best) (best = d), (hit = { x: pt.x, y: pt.y })
     }
@@ -294,10 +329,18 @@ export class MapView {
       this.measure = null
       this.vec.cancel()
       this.vec.setSelection([])
+      this.selPois.clear()
+      this.selDecor.clear()
     }
+    if (this.selDecor.size && (p?.decor?.length ?? 0) !== this.selDecorLen) this.selDecor.clear()
+    this.selDecorLen = p?.decor?.length ?? 0
     if (!this.hasView) this.fit()
-    this.invalidate()
+    // Edits share the parts they don't touch, so the terrain and decoration
+    // caches tell for themselves whether they need repainting.
+    this.invalidate(false)
   }
+
+  private selDecorLen = 0
 
   setChat(c: ChatMapState | null): void {
     this.chat = c
@@ -328,6 +371,15 @@ export class MapView {
     const b = this.tool === 'crop' && this.imageVisible() ? this.imageViewRect(true)! : this.profile.bounds
     const s = Math.min(this.w / (b.maxX - b.minX), this.hgt / (b.maxY - b.minY)) * 0.96
     this.view = { cx: (b.minX + b.maxX) / 2, cy: (b.minY + b.maxY) / 2, s: Math.max(MIN_S, Math.min(MAX_S, s)) }
+    this.hasView = true
+    this.invalidate(false)
+  }
+
+  /** Show a world rectangle, not zooming in further than `maxScale` (default: the focus zoom). */
+  fitTo(b: Bounds, maxScale = this.focusScale()): void {
+    if (!this.w || !this.hgt) return
+    const s = Math.min(this.w / Math.max(1e-6, b.maxX - b.minX), this.hgt / Math.max(1e-6, b.maxY - b.minY)) * 0.7
+    this.view = { cx: (b.minX + b.maxX) / 2, cy: (b.minY + b.maxY) / 2, s: Math.max(MIN_S, Math.min(MAX_S, maxScale, s)) }
     this.hasView = true
     this.invalidate(false)
   }
@@ -553,7 +605,10 @@ export class MapView {
 
   private bind(): void {
     const el = this.el
+    // Cards, the search box and menus float over the map: their events are theirs.
+    const overlay = (e: Event) => e.target !== el && e.target !== this.canvas
     el.addEventListener('pointerdown', (e) => {
+      if (overlay(e)) return
       const middle = e.button === 1 && e.pointerType === 'mouse'
       if (e.button !== 0 && !middle && e.pointerType === 'mouse') return
       if (middle) e.preventDefault()
@@ -616,6 +671,31 @@ export class MapView {
           return
         }
       }
+      if (this.tool === 'vselect' && this.profile) {
+        // Handles and vertices of a selected shape first, as before.
+        if (this.vec.grabsEdit(p.x, p.y) && this.vec.pointerDown('vselect', p.x, p.y, e)) {
+          this.gesture = { ...base, mode: 'vector' }
+          return
+        }
+        // Ctrl-drag always draws a selection box, even over a crowded map.
+        const hits = e.ctrlKey || e.metaKey ? [] : this.hitsAt(p.x, p.y)
+        let hit = hits[0]
+        // Alt-click: the next thing down in the stack under the cursor.
+        if (e.altKey && hits.length > 1) hit = hits[(hits.findIndex((x) => this.isSelected(x)) + 1) % hits.length]
+        if (!hit) {
+          if (!e.shiftKey) this.setSelected([])
+          const w = this.toWorld(p.x, p.y)
+          this.dragRect = { a: w, b: w }
+          this.gesture = { ...base, mode: 'box', additive: e.shiftKey }
+          return
+        }
+        if (e.shiftKey) {
+          this.setSelected(this.isSelected(hit) ? this.selectedHits().filter((x) => !sameHit(x, hit)) : [...this.selectedHits(), hit])
+          if (!this.isSelected(hit)) return
+        } else if (!this.isSelected(hit) || e.altKey) this.setSelected([hit])
+        this.gesture = { ...base, mode: 'sel', sel: this.startSelDrag(hit, p.x, p.y) }
+        return
+      }
       if (isVectorTool(this.tool) && this.vec.pointerDown(this.tool, p.x, p.y, e)) {
         this.gesture = { ...base, mode: 'vector' }
         return
@@ -644,6 +724,18 @@ export class MapView {
         this.view.cx += anchor.x - now.x
         this.view.cy += anchor.y - now.y
         this.invalidate(false)
+        return
+      }
+      if (g?.mode === 'sel' && g.sel) {
+        if (!g.moved && Math.hypot(p.x - g.sx, p.y - g.sy) > 3) g.moved = true
+        if (g.moved) this.moveSel(g.sel, p.x, p.y, e, 'move')
+        this.updateHover(p.x, p.y)
+        return
+      }
+      if (g?.mode === 'box' && this.dragRect) {
+        if (!g.moved && Math.hypot(p.x - g.sx, p.y - g.sy) > 3) g.moved = true
+        this.dragRect.b = this.toWorld(p.x, p.y)
+        this.updateHover(p.x, p.y)
         return
       }
       if (g && (g.mode === 'crop' || g.mode === 'imgxf')) {
@@ -717,6 +809,22 @@ export class MapView {
         this.updateHover(p.x, p.y)
         return
       }
+      if (g.mode === 'sel') {
+        if (g.moved && g.sel) this.moveSel(g.sel, p.x, p.y, e, 'end')
+        this.updateHover(p.x, p.y)
+        return
+      }
+      if (g.mode === 'box') {
+        const r = this.dragRect
+        this.dragRect = null
+        if (r && g.moved) {
+          const box = { minX: Math.min(r.a.x, r.b.x), maxX: Math.max(r.a.x, r.b.x), minY: Math.min(r.a.y, r.b.y), maxY: Math.max(r.a.y, r.b.y) }
+          const inside = this.hitsIn(box)
+          this.setSelected(g.additive ? [...this.selectedHits(), ...inside.filter((x) => !this.isSelected(x))] : inside)
+        }
+        this.invalidate(false)
+        return
+      }
       if (g.mode === 'land') {
         const w = this.toWorld(p.x, p.y)
         const lasso = this.lasso
@@ -775,6 +883,7 @@ export class MapView {
     el.addEventListener(
       'wheel',
       (e) => {
+        if (overlay(e)) return
         e.preventDefault()
         const p = this.local(e)
         const dy = (e.deltaMode === 1 ? 16 : 1) * (e.deltaY || e.deltaX)
@@ -785,6 +894,7 @@ export class MapView {
     )
 
     el.addEventListener('dblclick', (e) => {
+      if (overlay(e)) return
       const p = this.local(e)
       if (isVectorTool(this.tool)) {
         this.vec.dblclick(this.tool, p.x, p.y)
@@ -795,6 +905,7 @@ export class MapView {
     })
 
     el.addEventListener('contextmenu', (e) => {
+      if (overlay(e)) return
       e.preventDefault()
       const p = this.local(e)
       const w = this.toWorld(p.x, p.y)
@@ -806,8 +917,13 @@ export class MapView {
     })
     el.addEventListener('blur', () => (this.spaceDown = false))
     el.addEventListener('keydown', (e) => {
+      if (overlay(e)) return
       if (e.key === ' ') {
         this.spaceDown = true
+        e.preventDefault()
+        return
+      }
+      if (this.tool === 'vselect' && this.selKey(e)) {
         e.preventDefault()
         return
       }
@@ -852,7 +968,8 @@ export class MapView {
       case 'pan':
         this.selectedId = poi?.id ?? null
         this.hooks.onSelectPoi(poi)
-        this.invalidate()
+        if (!poi) this.hooks.onInspectShape(this.vec.featuresAt(sx, sy, true).find((f) => f.name || f.note) ?? null)
+        this.invalidate(false)
         return
       case 'measure': {
         const at = poi ? { x: poi.x, y: poi.y } : w
@@ -898,7 +1015,7 @@ export class MapView {
     this.hoverPoi = this.poiAt(sx, sy)
     const g = this.gesture
     const crop = g?.mode === 'crop' || g?.mode === 'imgxf' ? g.crop! : g ? null : this.cropHit(sx, sy)
-    const vcur = isVectorTool(this.tool) ? this.vec.cursorFor(this.tool, sx, sy) : null
+    const vcur = this.tool === 'vselect' && !g ? (this.vec.grabsEdit(sx, sy) ? this.vec.cursorFor(this.tool, sx, sy) : this.hitsAt(sx, sy).length ? 'move' : null) : isVectorTool(this.tool) ? this.vec.cursorFor(this.tool, sx, sy) : null
     this.el.style.cursor = this.spaceDown || g?.mode === 'pan' ? (g?.moved ? 'grabbing' : 'grab') : crop ? CROP_CURSOR[crop] : (vcur ?? (g?.mode === 'poi' ? 'grabbing' : this.hoverPoi && this.tool === 'pmove' ? 'move' : this.hoverPoi && this.tool === 'pan' ? 'pointer' : ''))
     this.renderReadout()
     this.invalidate(false)
@@ -1060,6 +1177,7 @@ export class MapView {
       const picOnTop = this.imageOnTop || PICTURE_TOOLS.has(this.tool) || !!p.image?.blend
       if (this.imageVisible() && !editingImage && !picOnTop) this.drawImage(false)
       this.drawBase(p)
+      if (this.liveStamps && this.layers.decor) this.decor.draw(this.g, this.liveStamps, this.painter, this.w, this.hgt, this.decorOpacity)
       if (this.imageVisible() && !editingImage && picOnTop) this.drawImage(false)
       this.vec.draw(this.g, this.w, this.hgt, colors)
       if (this.imageVisible() && editingImage) this.drawImage(cropping)
@@ -1075,7 +1193,8 @@ export class MapView {
         this.drawDragRect(t)
       }
       this.vec.drawOverlay(this.g, colors, this.tool)
-      if (this.snapMark && this.gesture?.mode === 'vector') {
+      if (this.tool === 'vselect') this.drawSelDecor(p, t)
+      if (this.snapMark && (this.gesture?.mode === 'vector' || this.gesture?.mode === 'sel')) {
         const m = this.toScreen(this.snapMark.x, this.snapMark.y)
         g.strokeStyle = t.accent
         g.lineWidth = 2
@@ -1109,6 +1228,183 @@ export class MapView {
       if (editingImage) this.drawCropEditor(t, !cropping)
     }
     if (!this.baking) this.drawRulers(step, t)
+  }
+
+  // ── Select tool ───────────────────────────────────────────────────────────
+
+  /** Everything under a screen point, topmost first: places, spots and lines, decorations, then areas. */
+  private hitsAt(sx: number, sy: number): Hit[] {
+    const p = this.profile
+    if (!p) return []
+    const out: Hit[] = []
+    if (this.layers.points) {
+      const near = p.points
+        .filter((q) => !q.hidden)
+        .map((q) => ({ q, d: Math.hypot(this.toScreen(q.x, q.y).x - sx, this.toScreen(q.x, q.y).y - sy) }))
+        .filter((x) => x.d < 10)
+        .sort((a, b) => a.d - b.d)
+      for (const { q } of near) out.push({ kind: 'poi', id: q.id })
+    }
+    const feats = this.vec.featuresAt(sx, sy)
+    for (const f of feats) if (f.geom !== 'area') out.push({ kind: 'feature', id: f.id })
+    if (p.decor?.length && this.layers.decor) for (const i of stampsAt(p.decor, this.painter, sx, sy)) out.push({ kind: 'decor', i })
+    for (const f of feats) if (f.geom === 'area') out.push({ kind: 'feature', id: f.id })
+    return out
+  }
+
+  /** Everything inside a world rectangle that the box selects. */
+  private hitsIn(r: Bounds): Hit[] {
+    const p = this.profile
+    if (!p) return []
+    const inside = (x: number, y: number) => x >= r.minX && x <= r.maxX && y >= r.minY && y <= r.maxY
+    const out: Hit[] = []
+    if (this.layers.points) for (const q of p.points) if (!q.hidden && inside(q.x, q.y)) out.push({ kind: 'poi', id: q.id })
+    for (const f of this.vec.featuresIn(r)) out.push({ kind: 'feature', id: f.id })
+    if (this.layers.decor) (p.decor ?? []).forEach((st, i) => inside(st.x, st.y) && out.push({ kind: 'decor', i }))
+    return out
+  }
+
+  private isSelected(h: Hit): boolean {
+    return h.kind === 'poi' ? this.selPois.has(h.id) : h.kind === 'decor' ? this.selDecor.has(h.i) : this.vec.selection.has(h.id)
+  }
+
+  selectedHits(): Hit[] {
+    return [
+      ...[...this.selPois].map((id): Hit => ({ kind: 'poi', id })),
+      ...[...this.vec.selection].map((id): Hit => ({ kind: 'feature', id })),
+      ...[...this.selDecor].map((i): Hit => ({ kind: 'decor', i })),
+    ]
+  }
+
+  /** Replace the Select tool's selection. */
+  setSelected(hits: Hit[]): void {
+    const before = this.selectedHits()
+    this.selPois.clear()
+    this.selDecor.clear()
+    const feats: string[] = []
+    for (const h of hits) {
+      if (h.kind === 'poi') this.selPois.add(h.id)
+      else if (h.kind === 'decor') this.selDecor.add(h.i)
+      else if (!feats.includes(h.id)) feats.push(h.id)
+    }
+    const featsChanged = feats.length !== this.vec.selection.size || feats.some((id) => !this.vec.selection.has(id))
+    this.vec.choose(feats)
+    this.selectedId = this.selPois.size === 1 ? [...this.selPois][0] : null
+    this.invalidate(false)
+    const after = this.selectedHits()
+    if (before.length === after.length && before.every((x) => after.some((y) => sameHit(x, y)))) return
+    if (featsChanged) this.hooks.onFeatureSelection(feats)
+    this.hooks.onSelectionChange()
+  }
+
+  /** The drag's starting state: where everything selected was, and the point that snaps. */
+  private startSelDrag(hit: Hit, sx: number, sy: number): SelDrag {
+    const p = this.profile!
+    const world = this.toWorld(sx, sy)
+    const pois = p.points.filter((q) => this.selPois.has(q.id)).map((q) => ({ id: q.id, x: q.x, y: q.y }))
+    const decor = [...this.selDecor].filter((i) => p.decor?.[i]).map((i) => ({ i, st: p.decor![i] }))
+    const editable = new Set(this.vec.featuresIn({ minX: -Infinity, maxX: Infinity, minY: -Infinity, maxY: Infinity }).map((f) => f.id))
+    const feats = (p.features ?? []).filter((f) => this.vec.selection.has(f.id) && editable.has(f.id))
+    // The point that snaps: the grabbed place or stamp, or the grabbed shape's nearest vertex.
+    let ref: [number, number] = [world.x, world.y]
+    if (hit.kind === 'poi') {
+      const q = p.points.find((x) => x.id === hit.id)
+      if (q) ref = [q.x, q.y]
+    } else if (hit.kind === 'decor') {
+      const st = p.decor?.[hit.i]
+      if (st) ref = [st.x, st.y]
+    } else {
+      let best = Infinity
+      for (const f of feats.filter((x) => x.id === hit.id))
+        for (const r of f.rings)
+          for (const q of r) {
+            const d = Math.hypot(q[0] - world.x, q[1] - world.y)
+            if (d < best) (best = d), (ref = [q[0], q[1]])
+          }
+    }
+    return { world, ref, pois, decor, feats }
+  }
+
+  /** Move the selection by the drag so far. Decorations show as a preview until the drop. */
+  private moveSel(d: SelDrag, sx: number, sy: number, mods: { ctrlKey: boolean; metaKey: boolean }, phase: 'move' | 'end'): void {
+    const p = this.profile
+    if (!p) return
+    const w = this.toWorld(sx, sy)
+    const t = this.snapWorld(d.ref[0] + w.x - d.world.x, d.ref[1] + w.y - d.world.y, mods, new Set(d.feats.map((f) => f.id)), new Set(d.pois.map((q) => q.id)))
+    this.shiftSel(d, t.x - d.ref[0], t.y - d.ref[1], phase)
+  }
+
+  private shiftSel(d: SelDrag, dx: number, dy: number, phase: 'move' | 'end'): void {
+    const p = this.profile!
+    const r = (v: number) => Math.round(v * 100) / 100
+    const pois = d.pois.map((q) => ({ id: q.id, x: r(q.x + dx), y: r(q.y + dy) }))
+    let features: Feature[] | null = null
+    if (d.feats.length) {
+      const moved = new Map(d.feats.map((f) => [f.id, { ...f, rings: f.rings.map((ring) => ring.map(([x, y]) => [r(x + dx), r(y + dy)] as [number, number])) }]))
+      features = (p.features ?? []).map((f) => moved.get(f.id) ?? f)
+    }
+    let decor: DecorStamp[] | null = null
+    if (d.decor.length) {
+      decor = (p.decor ?? []).slice()
+      const now = d.decor.map(({ i, st }) => (decor![i] = { ...st, x: r(st.x + dx), y: r(st.y + dy) }))
+      if (phase === 'move') {
+        // The dragged stamps leave the cached picture once, then draw live on top.
+        if (!this.liveStamps) {
+          const picked = new Set(d.decor.map((x) => x.i))
+          for (const { st } of d.decor) {
+            const m = st.s * 1.5
+            this.eraseAreas.push({ minX: st.x - m, maxX: st.x + m, minY: st.y - m, maxY: st.y + m })
+          }
+          this.strokeDecor = (p.decor ?? []).filter((_, i) => !picked.has(i))
+        }
+        this.liveStamps = now
+      }
+    }
+    if (pois.length || features || phase === 'end') this.hooks.onMoveSelection({ pois, features, decor: phase === 'end' ? decor : null }, phase)
+    if (phase === 'end') this.endPreview()
+    else this.invalidate(false)
+  }
+
+  /** Delete, arrow nudges and Escape for the Select tool. */
+  private selKey(e: KeyboardEvent): boolean {
+    const any = this.selPois.size || this.selDecor.size || this.vec.selection.size
+    if (!any) return false
+    if ((e.key === 'Delete' || e.key === 'Backspace') && (this.selPois.size || this.selDecor.size)) {
+      this.hooks.onDeleteSelection({ pois: [...this.selPois], decor: [...this.selDecor], features: [...this.vec.selection] })
+      this.setSelected([])
+      return true
+    }
+    if (e.key === 'Escape') {
+      this.setSelected([])
+      return true
+    }
+    if (e.key.startsWith('Arrow') && (this.selPois.size || this.selDecor.size)) {
+      const step = snapStep(e)
+      const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0
+      const dy = e.key === 'ArrowDown' ? -step : e.key === 'ArrowUp' ? step : 0
+      const first = this.selectedHits()[0]
+      this.shiftSel(this.startSelDrag(first, 0, 0), dx, dy, 'end')
+      return true
+    }
+    return false
+  }
+
+  /** Dashed boxes around selected decorations. */
+  private drawSelDecor(p: WorldProfile, t: Theme): void {
+    const list = this.liveStamps ? null : p.decor
+    if (!this.selDecor.size) return
+    const g = this.g
+    g.save()
+    g.strokeStyle = t.accent
+    g.lineWidth = 1.2
+    g.setLineDash([4, 3])
+    for (const st0 of this.liveStamps ?? [...this.selDecor].map((i) => list?.[i])) {
+      const st = st0
+      if (!st) continue
+      const b = stampBox(st, this.painter)
+      g.strokeRect(b.x0 - 2, b.y0 - 2, b.x1 - b.x0 + 4, b.y1 - b.y0 + 4)
+    }
+    g.restore()
   }
 
   /** Show terrain cells painted by a stroke that isn't saved yet. */
@@ -1145,13 +1441,21 @@ export class MapView {
 
   /** The stroke was saved (or dropped): stop showing it. */
   endPreview(): void {
-    if (!this.strokeCells && !this.strokeStamps && !this.strokeDecor) return
+    const decorTouched = !!(this.liveStamps || this.strokeStamps || this.strokeDecor)
+    const landTouched = !!this.strokeCells
+    this.liveStamps = null
+    if (!landTouched && !decorTouched) return
     this.strokeCells = null
     this.strokeStamps = null
     this.strokeDecor = null
     this.eraseAreas = []
     this.strokeDrawn = 0
-    this.invalidate()
+    // Only the layer the stroke painted into is redrawn from the saved map.
+    if (this.base) {
+      if (landTouched) this.base.landKey = []
+      if (decorTouched) this.base.decorKey = []
+    }
+    this.invalidate(false)
   }
 
   /** Maps the world into a cached layer, drawn at the cache's own view with its margin. */
@@ -1306,7 +1610,10 @@ export class MapView {
     // Stamps reach past their centre; repaint neighbours that overlap the area too.
     let reach = 1
     for (const s of decor ?? []) if (s.s * 1.5 > reach) reach = s.s * 1.5
-    for (const a of this.eraseAreas) {
+    let areas = this.eraseAreas
+    if (areas.length > 4)
+      areas = [areas.reduce((u, a) => ({ minX: Math.min(u.minX, a.minX), maxX: Math.max(u.maxX, a.maxX), minY: Math.min(u.minY, a.minY), maxY: Math.max(u.maxY, a.maxY) }))]
+    for (const a of areas) {
       const p0 = painter.toScreen(a.minX - reach, a.maxY + reach)
       const p1 = painter.toScreen(a.maxX + reach, a.minY - reach)
       g.save()
@@ -1498,18 +1805,12 @@ export class MapView {
     g.fillText(text, x, y, maxW)
   }
 
-  private poiColor(p: Poi): string {
-    if (p.color) return p.color
-    const top = p.group.split(' / ').slice(0, 2).join('/')
-    return `hsl(${hueOf(top || 'x')} 65% 62%)`
-  }
-
   private drawPoints(p: WorldProfile, t: Theme): void {
     const g = this.g
     const placed: { x: number; y: number; w: number; h: number }[] = []
     const visible = p.points.filter((pt) => !pt.hidden)
     const priority = (pt: Poi) =>
-      pt.id === this.hoverPoi?.id ? 0 : pt.id === this.selectedId ? 1 : this.chat?.dest && pt.x === this.chat.dest.x && pt.y === this.chat.dest.y ? 2 : 3
+      pt.id === this.hoverPoi?.id ? 0 : pt.id === this.selectedId || this.selPois.has(pt.id) ? 1 : this.chat?.dest && pt.x === this.chat.dest.x && pt.y === this.chat.dest.y ? 2 : 3
     const ordered = [...visible].sort((a, b) => priority(a) - priority(b))
 
     // Moved places: a hollow ring where the lorebook puts them, joined to where they are now.
@@ -1518,7 +1819,7 @@ export class MapView {
     g.setLineDash([3, 3])
     g.lineWidth = 1.2
     for (const pt of visible) {
-      if (!pt.origin || (this.tool !== 'pmove' && pt.id !== this.selectedId)) continue
+      if (!pt.origin || (this.tool !== 'pmove' && pt.id !== this.selectedId && !this.selPois.has(pt.id))) continue
       const o = this.toScreen(pt.origin.x, pt.origin.y)
       const s = this.toScreen(pt.x, pt.y)
       g.strokeStyle = t.muted
@@ -1536,14 +1837,9 @@ export class MapView {
     for (const pt of visible) {
       const s = this.toScreen(pt.x, pt.y)
       if (s.x < -10 || s.y < -10 || s.x > this.w + 10 || s.y > this.hgt + 10) continue
-      const hot = pt.id === this.hoverPoi?.id || pt.id === this.selectedId
-      g.beginPath()
-      g.arc(s.x, s.y, hot ? 6 : 4.2, 0, Math.PI * 2)
-      g.fillStyle = this.poiColor(pt)
-      g.fill()
-      g.lineWidth = hot ? 2.5 : 1.5
-      g.strokeStyle = hot ? t.text : t.bg
-      g.stroke()
+      const hot = pt.id === this.hoverPoi?.id || pt.id === this.selectedId || this.selPois.has(pt.id)
+      const style = markerStyle(p, pt)
+      drawMarker(g, style, s.x, s.y, (hot ? 6 : 4.2) * (style.shape === 'dot' ? 1 : 1.15), hot ? t.text : t.bg, hot ? 2.5 : 1.5)
     }
 
     if (!this.layers.labels) return

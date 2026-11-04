@@ -1,12 +1,13 @@
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types'
-import { bearing, boundsOf, calibMaps, calibrationForBounds, cropToBounds, compass, distanceUnits, formatCoord, formatKm, imageToWorld, locate, normalizeCalib, rectCalibration } from '../shared/geo'
-import { FEATURE_TYPES, LAYER_LABEL, LAYER_ORDER, featuresFromJson, featuresToGeoJson, layerSettings, newFeatureId, pointInRings, simplify } from '../shared/features'
+import { bearing, boundsOf, calibMaps, calibrationForBounds, cropToBounds, compass, distanceUnits, formatCoord, formatKm, imageToWorld, locate, normalizeCalib, rectCalibration, zoneRect } from '../shared/geo'
+import { FEATURE_TYPES, LAYER_LABEL, LAYER_ORDER, featureBounds, featuresFromJson, featuresToGeoJson, layerSettings, newFeatureId, pointInRings, simplify, typeLabel } from '../shared/features'
 import { entriesFromLorebookJson, hasMapData, parseMapEntries } from '../shared/mapext'
 import { mergeInto, newProfile, parseCoordinateText, slug, type ParseResult } from '../shared/parser'
 import { VAR_NAME_RE, isMoved, movePoint, placeRef, placeText, placesVarName, revertPoint } from '../shared/places'
 import { applyRefs, findCoords, guessName, resolveRefs, type CoordHit } from '../shared/convert'
 import type {
   DecorStamp,
+  MarkerShape,
   StampAsset,
   BackendMessage,
   Bounds,
@@ -26,6 +27,8 @@ import type {
 } from '../shared/types'
 import { clear, debounce, enableScrub, h, hueOf, icon, numOrNull } from './dom'
 import { History } from './history'
+import { editableCopy } from './cow'
+import { MARKER_SHAPES, defaultColor, groupStyle, markerStyle, markerThumb } from './markers'
 import { MapView, type Layers, type Tool } from './viewport'
 import { isVectorTool } from './vector'
 import { DECOR_BRUSHES, StampIndex, brushById, brushDab, brushPreview, convertibleToDecor, decorFromShapes, decorUnit, eraseStamps, setStampLibrary, yourDecorBrushes, type DecorBrush } from './decor'
@@ -52,6 +55,7 @@ const DIALOG_TITLE: Record<Dialog, string> = { chat: 'Story', import: 'Import', 
 const RAIL: { tool: Tool; icon: IconName; label: string; key: string }[][] = [
   [
     { tool: 'pan', icon: 'hand', label: 'Hand', key: 'h' },
+    { tool: 'vselect', icon: 'select', label: 'Select', key: 'v' },
     { tool: 'measure', icon: 'ruler', label: 'Measure', key: 'm' },
   ],
   [
@@ -60,11 +64,9 @@ const RAIL: { tool: Tool; icon: IconName; label: string; key: string }[][] = [
   ],
   [
     { tool: 'add', icon: 'pin', label: 'Add place', key: 'a' },
-    { tool: 'pmove', icon: 'movepin', label: 'Move places', key: 'o' },
     { tool: 'zone', icon: 'zone', label: 'Draw zone', key: 'z' },
   ],
   [
-    { tool: 'vselect', icon: 'select', label: 'Select features', key: 'v' },
     { tool: 'varea', icon: 'area', label: 'Draw area', key: 'r' },
     { tool: 'vline', icon: 'line', label: 'Draw line', key: 'l' },
     { tool: 'vspot', icon: 'spot', label: 'Place spot', key: 's' },
@@ -103,7 +105,6 @@ const TOOL_PANEL: Partial<Record<Tool, Panel>> = {
   add: 'points',
   pmove: 'points',
   zone: 'zones',
-  vselect: 'layers',
   varea: 'layers',
   vline: 'layers',
   vspot: 'layers',
@@ -130,7 +131,7 @@ const TOOL_HINT: Partial<Record<Tool, string>> = {
   crop: 'Drag the corners or edges to crop; drag inside to move the box. Esc when done.',
   zone: 'Drag a rectangle to create a zone.',
   imgxf: 'Drag inside the picture to move it; corners scale (Shift keeps proportions), edges stretch. Esc when done.',
-  vselect: 'Click a feature (Shift adds); drag to move; handles scale. Drag a vertex, double-click an edge to add one, Delete removes. Space+drag pans.',
+  vselect: 'Click a place, shape or decoration (Shift adds, Alt picks the one underneath); drag to move; drag on empty map (or Ctrl-drag anywhere) to box-select. Arrows nudge, Delete removes. A selected shape shows handles to scale and points to drag. Space+drag pans.',
   varea: 'Click to add points or drag freehand; Enter or double-click finishes; Backspace undoes a point; Esc cancels.',
   vline: 'Click to add points or drag freehand; Enter or double-click finishes; Backspace undoes a point; Esc cancels.',
   vspot: 'Click to place.',
@@ -225,6 +226,11 @@ export class MapApp {
   /** The place card: a clicked place's details and lorebook entry, next to it on the map. */
   private card: HTMLDivElement
   private cardPoi: string | null = null
+  /** The place group whose marker style box is open in the Places list. */
+  private styleGroup: string | null = null
+  /** A shape whose card is open (clicked with the hand). */
+  private cardShape: string | null = null
+  private searchBox: HTMLDivElement
   /** Lorebook entries already fetched, by book, for place cards. */
   private bookEntries = new Map<string, WorldBookEntryLite[]>()
   private booksAsked = false
@@ -317,6 +323,10 @@ export class MapApp {
         onImageEdit: (patch, phase) => this.onImageEdit(patch, phase),
         onFeaturesEdit: (next, phase) => this.onFeaturesEdit(next, phase),
         onFeatureSelection: (ids) => this.onFeatureSelection(ids),
+        onMoveSelection: (m, phase) => this.onMoveSelection(m, phase),
+        onDeleteSelection: (sel) => this.onDeleteSelection(sel),
+        onSelectionChange: () => this.onSelectionChange(),
+        onInspectShape: (f) => this.onInspectShape(f),
         warn: (m) => this.warn(m),
       },
       rulerX,
@@ -331,7 +341,9 @@ export class MapApp {
     this.menu.hidden = true
     this.card = h('div', { class: 'mt-card' })
     this.card.hidden = true
-    this.map.el.append(this.hint, this.menu, this.card)
+    this.searchBox = h('div', { class: 'mt-search' })
+    this.searchBox.hidden = true
+    this.map.el.append(this.hint, this.menu, this.card, this.searchBox)
 
     this.profileSelect = h('select', { class: 'mt-select mt-profile', title: 'Map', onchange: () => this.onProfileChange() })
     this.toolbar = this.buildToolbar()
@@ -442,9 +454,15 @@ export class MapApp {
         this.closeDialog()
         return
       }
-      if (k === 'escape' && this.cardPoi) {
+      if (k === 'escape' && (this.cardPoi || this.cardShape)) {
         this.cardPoi = null
+        this.cardShape = null
         this.renderCard()
+        return
+      }
+      if (k === '/') {
+        this.openSearch()
+        e.preventDefault()
         return
       }
       const hit = !e.shiftKey && RAIL.flat().find((r) => r.key === k)
@@ -456,6 +474,7 @@ export class MapApp {
     }
     if (k === 'z' && !e.shiftKey) this.undo()
     else if ((k === 'z' && e.shiftKey) || k === 'y') this.redo()
+    else if (k === 'f') this.openSearch()
     else return
     e.preventDefault()
     e.stopPropagation()
@@ -615,8 +634,9 @@ export class MapApp {
   private mutate(fn: (p: WorldProfile) => void, rerenderSide = true, group: string | null = this.editGroup): void {
     if (!this.profile) return
     this.history.record(this.profile, group)
-    const next: WorldProfile = structuredClone(this.profile)
-    fn(next)
+    const { draft, done } = editableCopy(this.profile)
+    fn(draft)
+    const next = done()
     next.updatedAt = Date.now()
     this.profile = next
     this.map.setProfile(next)
@@ -654,6 +674,7 @@ export class MapApp {
       ),
       h('div', { class: 'mt-seg' }, this.undoBtn, this.redoBtn),
       h('div', { class: 'mt-spacer' }),
+      h('button', { class: 'mt-btn', title: 'Search the map (Ctrl+F)', onclick: () => this.openSearch() }, icon('search')),
       h(
         'div',
         { class: 'mt-seg' },
@@ -854,6 +875,7 @@ export class MapApp {
     // A plain click on a place (hand tool) opens its card; clicking empty map closes it.
     if (this.map.tool === 'pan') {
       this.cardPoi = poi?.id ?? null
+      if (poi) this.cardShape = null
       this.renderCard()
     }
     if (!poi) return
@@ -867,6 +889,7 @@ export class MapApp {
     const poi = p?.points.find((q) => q.id === this.cardPoi)
     clear(this.card)
     this.card.hidden = !poi
+    if (p && !poi && this.cardShape) return this.renderShapeCard(p)
     if (!p || !poi) return
     const chatId = this.chatId()
     const me = this.state?.chat?.pos
@@ -910,6 +933,178 @@ export class MapApp {
     const ch = this.card.offsetHeight
     this.card.style.left = `${Math.max(8, Math.min(at.x + 16 + cw > mw - 8 ? at.x - cw - 16 : at.x + 16, mw - cw - 8))}px`
     this.card.style.top = `${Math.max(8, Math.min(at.y - 24, mh - ch - 8))}px`
+  }
+
+  private onInspectShape(f: Feature | null): void {
+    this.cardShape = f?.id ?? null
+    if (f) this.cardPoi = null
+    this.renderCard()
+  }
+
+  /** A shape's card: its name, kind, note and where it is from you. */
+  private renderShapeCard(p: WorldProfile): void {
+    const f = p.features?.find((q) => q.id === this.cardShape)
+    if (!f) {
+      this.cardShape = null
+      return
+    }
+    this.card.hidden = false
+    const b = featureBounds([f])!
+    const cx = (b.minX + b.maxX) / 2
+    const cy = (b.minY + b.maxY) / 2
+    const me = this.state?.chat?.pos
+    const where: string[] = [f.geom === 'spot' ? formatCoord(cx, cy) : `around ${formatCoord(cx, cy)}`]
+    if (me) {
+      const inside = f.geom === 'area' && pointInRings(me.x, me.y, f.rings)
+      const units = distanceUnits(me.x, me.y, cx, cy)
+      where.push(inside ? 'you are inside it' : units < 0.5 ? 'you are here' : `${formatKm(units * p.unitKm)} ${compass(bearing(me.x, me.y, cx, cy))} of you`)
+    }
+    const close = () => {
+      this.cardShape = null
+      this.renderCard()
+    }
+    this.card.append(
+      h(
+        'div',
+        { class: 'mt-card-head' },
+        h('div', { class: 'mt-card-title' }, h('b', null, f.name || typeLabel(f.layer, f.type, f.geom)), h('span', { class: 'mt-dim' }, `${typeLabel(f.layer, f.type, f.geom)} · ${LAYER_LABEL[f.layer]}`)),
+        h('button', { class: 'mt-btn mt-icon-btn', title: 'Close (Esc)', onclick: close }, icon('close')),
+      ),
+      h('div', { class: 'mt-dim mt-mono' }, where.join(' \u00b7 ')),
+      f.note ? h('p', { class: 'mt-card-note' }, f.note) : '',
+      h(
+        'div',
+        { class: 'mt-row mt-wrap' },
+        h('button', { class: 'mt-btn', onclick: () => this.map.fitTo(b) }, 'Zoom to it'),
+        h(
+          'button',
+          {
+            class: 'mt-btn',
+            onclick: () => {
+              this.setTool('vselect')
+              this.map.setSelected([{ kind: 'feature', id: f.id }])
+              this.setDrawLayer(f.layer)
+              this.openPanel('layers')
+              close()
+            },
+          },
+          'Edit',
+        ),
+      ),
+    )
+    // Beside where it was clicked: the shape's centre, kept inside the map.
+    const at = this.map.toScreen(cx, cy)
+    const mw = this.map.el.clientWidth
+    const mh = this.map.el.clientHeight
+    const cw = this.card.offsetWidth
+    const ch = this.card.offsetHeight
+    this.card.style.left = `${Math.max(8, Math.min(at.x + 16, mw - cw - 8))}px`
+    this.card.style.top = `${Math.max(8, Math.min(at.y - 24, mh - ch - 8))}px`
+  }
+
+  // ── Search ────────────────────────────────────────────────────────────────
+
+  /** The search box over the map: places, named shapes and zones by name. */
+  private openSearch(): void {
+    const p = this.profile
+    if (!p) return
+    const box = this.searchBox
+    clear(box)
+    box.hidden = false
+    const input = h('input', { class: 'mt-input', type: 'search', placeholder: 'Search places, shapes and zones\u2026', spellcheck: false })
+    const list = h('div', { class: 'mt-search-list' })
+    type Result = { label: string; sub: string; go: () => void }
+    let results: Result[] = []
+    let active = 0
+    const close = () => {
+      box.hidden = true
+      clear(box)
+      this.el.focus({ preventScroll: true })
+    }
+    const draw = () => {
+      clear(list)
+      results.forEach((r, i) =>
+        list.append(
+          h(
+            'button',
+            { class: `mt-search-item${i === active ? ' mt-on' : ''}`, onclick: () => (r.go(), close()) },
+            h('span', null, r.label),
+            h('span', { class: 'mt-dim' }, r.sub),
+          ),
+        ),
+      )
+      if (input.value.trim() && !results.length) list.append(h('div', { class: 'mt-dim mt-search-none' }, 'Nothing by that name.'))
+    }
+    const find = () => {
+      const q = input.value.trim().toLowerCase()
+      active = 0
+      if (!q) {
+        results = []
+        return draw()
+      }
+      const score = (name: string, extra = '') => {
+        const n = name.toLowerCase()
+        return n.startsWith(q) ? 0 : n.split(/[^a-z0-9]+/).some((w) => w.startsWith(q)) ? 1 : n.includes(q) ? 2 : extra.toLowerCase().includes(q) ? 3 : -1
+      }
+      const found: (Result & { s: number })[] = []
+      for (const pt of p.points) {
+        const s = score(pt.name, `${pt.group} ${pt.note ?? ''}`)
+        if (s >= 0)
+          found.push({
+            s,
+            label: pt.name,
+            sub: pt.group.split(' / ').pop() || 'Place',
+            go: () => {
+              this.map.selectedId = pt.id
+              this.map.centerOn(pt.x, pt.y, this.map.focusScale())
+              this.cardShape = null
+              this.cardPoi = pt.id
+              this.renderCard()
+            },
+          })
+      }
+      for (const f of p.features ?? []) {
+        if (!f.name || f.hidden) continue
+        const s = score(f.name, f.note ?? '')
+        if (s >= 0)
+          found.push({
+            s,
+            label: f.name,
+            sub: typeLabel(f.layer, f.type, f.geom),
+            go: () => {
+              this.map.fitTo(featureBounds([f])!)
+              this.cardPoi = null
+              this.cardShape = f.id
+              this.renderCard()
+            },
+          })
+      }
+      for (const z of p.zones) {
+        const s = score(z.name, `${z.group} ${z.note ?? ''}`)
+        if (s >= 0) found.push({ s, label: z.name, sub: z.kind === 'region' ? 'Region' : 'Zone', go: () => this.map.fitTo(zoneRect(z, p.bounds, p.zones), Infinity) })
+      }
+      found.sort((a, b) => a.s - b.s || a.label.localeCompare(b.label))
+      results = found.slice(0, 10)
+      draw()
+    }
+    input.addEventListener('input', find)
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') close()
+      else if (e.key === 'ArrowDown') active = Math.min(results.length - 1, active + 1)
+      else if (e.key === 'ArrowUp') active = Math.max(0, active - 1)
+      else if (e.key === 'Enter' && results[active]) {
+        results[active].go()
+        close()
+        return
+      } else return
+      e.preventDefault()
+      e.stopPropagation()
+      draw()
+    })
+    input.addEventListener('blur', () => setTimeout(() => !box.contains(document.activeElement) && !box.hidden && close(), 150))
+    box.append(h('div', { class: 'mt-row' }, icon('search'), input), list)
+    // After the key that opened it, so that key isn't typed into the box.
+    setTimeout(() => input.focus(), 0)
   }
 
   /** The lorebook entry that belongs to a place: its title matches, or it mentions the place. */
@@ -1282,11 +1477,35 @@ export class MapApp {
     const name = r?.label ?? (t === 'crop' ? 'Crop picture' : t === 'imgxf' ? 'Transform picture' : t)
     bar.append(h('span', { class: 'mt-opt-tool' }, r ? icon(r.icon) : '', name))
     const p = this.profile
-    if (p && isVectorTool(t)) bar.append(...this.shapeOptions(t))
+    if (p && t === 'vselect') bar.append(...this.selectOptions())
+    else if (p && isVectorTool(t)) bar.append(...this.shapeOptions(t))
     if (p?.land && isLandTool(t)) bar.append(...this.landOptions(t))
     if (p && (t === 'dbrush' || t === 'derase')) bar.append(...this.decorOptions(t))
     const hint = TOOL_HINT[t]
     if (hint) bar.append(h('span', { class: 'mt-opt-hint', title: hint }, hint))
+  }
+
+  /** The Select tool's options: what is selected, and what you can do with it. */
+  private selectOptions(): HTMLElement[] {
+    const m = this.map
+    const n = { places: m.selPois.size, shapes: m.vec.selection.size, decor: m.selDecor.size }
+    const parts = [
+      n.places && `${n.places} ${n.places === 1 ? 'place' : 'places'}`,
+      n.shapes && `${n.shapes} ${n.shapes === 1 ? 'shape' : 'shapes'}`,
+      n.decor && `${n.decor} ${n.decor === 1 ? 'decoration' : 'decorations'}`,
+    ].filter(Boolean)
+    if (!parts.length) return [h('span', { class: 'mt-dim' }, 'Nothing selected')]
+    const out: HTMLElement[] = [h('span', { class: 'mt-opt' }, parts.join(', '))]
+    if (n.places === 1 && !n.shapes && !n.decor) {
+      const id = [...m.selPois][0]
+      out.push(h('button', { class: 'mt-btn', onclick: () => ((this.editingPoi = id), this.openPanel('points')) }, 'Edit place'))
+    }
+    if (n.shapes && !n.places && !n.decor) out.push(h('button', { class: 'mt-btn', onclick: () => this.openPanel('layers') }, 'Shape properties'))
+    out.push(
+      h('button', { class: 'mt-btn', title: 'Delete (Del)', onclick: () => this.onDeleteSelection({ pois: [...m.selPois], decor: [...m.selDecor], features: [...m.vec.selection] }, true) }, icon('trash'), 'Delete'),
+      h('button', { class: 'mt-btn mt-ghost', title: 'Deselect (Esc)', onclick: () => m.setSelected([]) }, 'Deselect'),
+    )
+    return out
   }
 
   private shapeOptions(t: Tool): HTMLElement[] {
@@ -1525,7 +1744,7 @@ export class MapApp {
         h('button', { class: 'mt-btn', title: 'Add point (click on map)', onclick: () => this.setTool('add') }, icon('plus'), 'Add'),
         h(
           'button',
-          { class: `mt-btn${this.map.tool === 'pmove' ? ' mt-on' : ''}`, title: 'Drag places on the map', onclick: () => this.setTool(this.map.tool === 'pmove' ? 'pan' : 'pmove') },
+          { class: `mt-btn${this.map.tool === 'vselect' ? ' mt-on' : ''}`, title: 'Select and drag places on the map (V)', onclick: () => this.setTool(this.map.tool === 'vselect' ? 'pan' : 'vselect') },
           icon('movepin'),
           'Move',
         ),
@@ -1569,15 +1788,25 @@ export class MapApp {
         groups.get(g)!.push(pt)
       }
       for (const [g, pts] of groups) {
-        const det = h('details', { class: 'mt-group', open: true }, h('summary', null, h('span', null, g.split(' / ').pop()!), h('span', { class: 'mt-dim' }, ` ${pts.length}`)))
+        const gs = { shape: groupStyle(p, g).shape ?? 'dot', color: groupStyle(p, g).color ?? defaultColor(g) }
+        const styleBtn = h('button', {
+          class: `mt-btn mt-icon-btn mt-style-btn${this.styleGroup === g ? ' mt-on' : ''}`,
+          title: 'Marker style for this group',
+          onclick: (e: Event) => {
+            e.preventDefault()
+            this.styleGroup = this.styleGroup === g ? null : g
+            renderList()
+          },
+        }, h('img', { src: markerThumb(gs), alt: '' }))
+        const det = h('details', { class: 'mt-group', open: true }, h('summary', null, h('span', null, g.split(' / ').pop()!), h('span', { class: 'mt-dim' }, ` ${pts.length}`), h('span', { class: 'mt-spacer' }), styleBtn))
         det.title = g
+        if (this.styleGroup === g) det.append(this.groupStyleBox(p, g))
         for (const pt of pts) {
-          const color = pt.color || `hsl(${hueOf(pt.group.split(' / ').slice(0, 2).join('/') || 'x')} 65% 62%)`
           det.append(
             h(
               'div',
               { class: `mt-item${pt.id === this.editingPoi ? ' mt-on' : ''}${pt.hidden ? ' mt-muted' : ''}` },
-              h('span', { class: 'mt-dot', style: `background:${color}` }),
+              h('img', { class: 'mt-marker', src: markerThumb(markerStyle(p, pt)), alt: '' }),
               h('button', { class: 'mt-item-name', onclick: () => this.focusPoi(pt) }, pt.name),
               pt.origin
                 ? h('span', { class: 'mt-mono mt-moved', title: `Moved. Lorebook: ${placeText(pt.origin.x, pt.origin.y)}` }, formatCoord(pt.x, pt.y))
@@ -1591,6 +1820,46 @@ export class MapApp {
       if (!groups.size) list.append(h('p', { class: 'mt-dim' }, q ? 'No matches.' : 'No points yet. Import coordinates or add points on the map.'))
     }
     renderList()
+  }
+
+  /** Shape and colour for a group's markers, inherited by its subgroups. */
+  private groupStyleBox(p: WorldProfile, g: string): HTMLElement {
+    const own = p.groupStyles?.[g] ?? {}
+    const inherited = groupStyle({ ...p, groupStyles: { ...p.groupStyles, [g]: {} } }, g)
+    const set = (patch: { shape?: MarkerShape | null; color?: string | null }) =>
+      this.mutate((d) => {
+        const next = { ...(d.groupStyles?.[g] ?? {}) }
+        if (patch.shape !== undefined) patch.shape ? (next.shape = patch.shape) : delete next.shape
+        if (patch.color !== undefined) patch.color ? (next.color = patch.color) : delete next.color
+        const all = { ...(d.groupStyles ?? {}) }
+        if (next.shape || next.color) all[g] = next
+        else delete all[g]
+        d.groupStyles = Object.keys(all).length ? all : undefined
+      })
+    const color = own.color ?? inherited.color ?? defaultColor(g)
+    const shapes = h('div', { class: 'mt-shape-row' })
+    for (const s of MARKER_SHAPES)
+      shapes.append(
+        h(
+          'button',
+          { class: `mt-btn mt-icon-btn${(own.shape ?? inherited.shape ?? 'dot') === s.id ? ' mt-on' : ''}`, title: s.label, onclick: () => set({ shape: s.id }) },
+          h('img', { src: markerThumb({ shape: s.id, color }), alt: s.label }),
+        ),
+      )
+    const picker = h('input', { class: 'mt-color', type: 'color', value: color.startsWith('#') ? color : '#7aa2ff' })
+    picker.addEventListener('change', () => set({ color: picker.value }))
+    return h(
+      'div',
+      { class: 'mt-style-box' },
+      shapes,
+      h(
+        'div',
+        { class: 'mt-row' },
+        h('label', { class: 'mt-check' }, picker, 'Colour'),
+        own.shape || own.color ? h('button', { class: 'mt-btn mt-ghost', onclick: () => set({ shape: null, color: null }) }, 'Reset') : '',
+        h('span', { class: 'mt-dim' }, g.includes(' / ') ? 'Places can still set their own.' : 'Subgroups and places can still set their own.'),
+      ),
+    )
   }
 
   /** Publish place coordinates to a chat variable that lorebook entries read. */
@@ -1648,6 +1917,7 @@ export class MapApp {
     let useColor = !!pt.color
     color.addEventListener('input', () => (useColor = true))
     const hidden = h('input', { type: 'checkbox', checked: !!pt.hidden })
+    const shape = h('select', { class: 'mt-select', title: 'Marker shape' }, h('option', { value: '' }, `Group style (${MARKER_SHAPES.find((s) => s.id === (groupStyle(p, pt.group).shape ?? 'dot'))!.label.toLowerCase()})`), ...MARKER_SHAPES.map((s) => h('option', { value: s.id, selected: pt.shape === s.id }, s.label)))
     const save = () => {
       const nx = numOrNull(x.value)
       const ny = numOrNull(y.value)
@@ -1660,6 +1930,7 @@ export class MapApp {
         movePoint(t, nx, ny)
         t.note = note.value.trim() || undefined
         t.color = useColor ? color.value : undefined
+        t.shape = (shape.value as MarkerShape) || undefined
         t.hidden = hidden.checked || undefined
       })
     }
@@ -1671,8 +1942,9 @@ export class MapApp {
       h(
         'div',
         { class: 'mt-row' },
+        shape,
         h('label', { class: 'mt-check' }, color, 'Color'),
-        h('button', { class: 'mt-btn mt-ghost', onclick: () => ((useColor = false), save()) }, 'Auto color'),
+        h('button', { class: 'mt-btn mt-ghost', onclick: () => ((useColor = false), save()) }, 'Group color'),
         h('label', { class: 'mt-check' }, hidden, 'Hidden'),
       ),
       h(
@@ -3333,7 +3605,9 @@ export class MapApp {
     if (!types.some((t) => t.type === f.type)) typeSel.append(h('option', { value: f.type }, f.type))
     typeSel.value = f.type
     typeSel.addEventListener('change', () => update({ type: typeSel.value }))
-    const fields: HTMLElement[] = [h('label', null, 'Name'), name, h('label', null, 'Type'), typeSel]
+    const note = h('textarea', { class: 'mt-input', rows: 2, placeholder: 'Shown when you click it on the map' }, f.note ?? '')
+    note.addEventListener('change', () => update({ note: note.value.trim() || undefined }))
+    const fields: HTMLElement[] = [h('label', null, 'Name'), name, h('label', null, 'Type'), typeSel, h('label', null, 'Note'), note]
     if (f.layer === 'topography') {
       const el = h('input', { class: 'mt-input', type: 'number', step: 'any', value: f.elevation === undefined ? '' : String(f.elevation), placeholder: 'height' })
       el.addEventListener('change', () => update({ elevation: numOrNull(el.value) ?? undefined }))
@@ -3405,6 +3679,55 @@ export class MapApp {
 
   private onFeatureSelection(_ids: string[]): void {
     if (this.panel === 'layers') this.renderSide(true)
+  }
+
+  /** The Select tool dragged or nudged its selection. */
+  private onMoveSelection(m: { pois: { id: string; x: number; y: number }[]; features: Feature[] | null; decor: DecorStamp[] | null }, phase: 'move' | 'end'): void {
+    if (!this.profile) return
+    this.editGroup ??= `select-${Date.now()}`
+    this.mutate((d) => {
+      if (m.pois.length) {
+        const at = new Map(m.pois.map((q) => [q.id, q]))
+        for (const t of d.points) {
+          const q = at.get(t.id)
+          if (q) movePoint(t, q.x, q.y)
+        }
+      }
+      if (m.features) d.features = m.features
+      if (m.decor) d.decor = m.decor
+    }, phase === 'end')
+    if (phase === 'end') this.editGroup = null
+  }
+
+  /** Delete what the Select tool has selected (shapes on locked or hidden layers stay). */
+  private onDeleteSelection(sel: { pois: string[]; decor: number[]; features: string[] }, clear = false): void {
+    const p = this.profile
+    if (!p) return
+    const pois = new Set(sel.pois)
+    const decor = new Set(sel.decor)
+    const feats = new Set(sel.features.filter((id) => {
+      const f = p.features?.find((q) => q.id === id)
+      const st = f && layerSettings(p.layerSettings, f.layer)
+      return st && st.visible && !st.locked
+    }))
+    if (!pois.size && !decor.size && !feats.size) return
+    this.mutate((d) => {
+      if (pois.size) d.points = d.points.filter((q) => !pois.has(q.id))
+      if (decor.size) d.decor = (d.decor ?? []).filter((_, i) => !decor.has(i))
+      if (feats.size) d.features = (d.features ?? []).filter((f) => !feats.has(f.id))
+    })
+    if (clear) this.map.setSelected([])
+    const n = pois.size + decor.size + feats.size
+    this.warn(`Deleted ${n} ${n === 1 ? 'item' : 'items'}. Undo with Ctrl+Z.`)
+  }
+
+  private onSelectionChange(): void {
+    const ids = [...this.map.selPois]
+    if (ids.length === 1 && !this.map.selDecor.size && !this.map.vec.selection.size) {
+      this.editingPoi = ids[0]
+      if (this.panel === 'points') this.renderSide(true)
+    }
+    if (this.map.tool === 'vselect') this.renderOptions()
   }
 
   private async importLayers(): Promise<void> {

@@ -29,17 +29,18 @@ The layout follows image editors such as Photoshop or Affinity:
 
   | Tool | Key | | Tool | Key |
   |---|---|---|---|---|
-  | Hand | H | | Select features | V |
-  | Measure | M | | Draw area | R |
-  | My position | P | | Draw line | L |
-  | Destination | D | | Place spot | S |
-  | Add place | A | | Biome brush | B |
-  | Move places | O | | Biome fill | G |
-  | Draw zone | Z | | Biome lasso | J |
+  | Hand | H | | Draw area | R |
+  | Select | V | | Draw line | L |
+  | Measure | M | | Place spot | S |
+  | My position | P | | Biome brush | B |
+  | Destination | D | | Biome fill | G |
+  | Add place | A | | Biome lasso | J |
+  | Draw zone | Z | | Biome eyedropper | I |
   | Decoration brush | Q | | Magic wand | W |
-  | Decoration eraser | E | | Biome eyedropper | I |
+  | Decoration eraser | E | | | |
 
   Clicking a tool always selects it; Esc returns to the hand.
+- **Select** (V) picks and moves anything on the map: places, shapes (landmarks, nature, outlines) and single decorations. Click to select the topmost thing under the cursor; **Shift**-click adds or removes; **Alt**-click picks the next thing down in the stack. Drag to move everything selected together; drag on empty map, or **Ctrl**-drag anywhere, to box-select. Arrow keys nudge (Shift 10, Alt 0.1), **Delete** removes, **Esc** deselects. A single selected shape shows handles to scale and points to drag; double-click an edge to add a point. The options bar says what is selected, with Delete and a shortcut to the place's or shape's properties. Shapes on hidden or locked layers can't be picked.
 - **Snapping** (magnet in the top bar, on by default): shapes snap to nearby places and shape points (a small square marks the hit), otherwise to whole steps that suit the zoom, when moving, scaling, dragging a point or drawing. Hold **Ctrl** to place freely. **Shift** draws at 15° angles and keeps proportions when scaling from a corner; **Alt** scales from the centre.
 - **Bake to picture** (Map panel): flattens the whole canvas, with the layers visible now, into one picture 2,048, 4,096 or 8,192 pixels wide. **Download PNG**, or **Use as map picture** to replace the picture with it, placed exactly over the canvas.
 - **Options bar** (under the top bar): the active tool's settings, such as the brush's biome, size and Keep coastline, or the shape layer and type, and a one-line hint.
@@ -121,8 +122,8 @@ Markdown version of the same thing:
 
 The lorebook gathers your places; the map owns where they are.
 
-- **Move places** (O, or **Move** in the Places properties): drag a place to its spot. Positions snap to whole units; hold Shift for 10 or Alt for 0.1. The arrow keys nudge the selected place with the same modifiers. Every move can be undone.
-- A moved place remembers where the lorebook put it. While moving places, a hollow ring and a dashed line show that position. The Places properties count moved places, can list only those, and reverts one (**Revert** in its editor, or right-click > **Back to lorebook position**) or all of them.
+- **Select** (V, or **Move** in the Places properties): drag a place to its spot. With snapping on, it snaps to nearby places and shape points or to whole steps that suit the zoom; hold Ctrl to place freely. The arrow keys nudge the selection by 1 (Shift 10, Alt 0.1). Every move can be undone.
+- A moved place remembers where the lorebook put it. When a moved place is selected, a hollow ring and a dashed line show that position. The Places properties count moved places, can list only those, and reverts one (**Revert** in its editor, or right-click > **Back to lorebook position**) or all of them.
 - Re-importing from the lorebook refreshes names, groups and notes but keeps moved places where you put them. Their lorebook position updates to the new import.
 
 ### Lorebook variable
@@ -178,6 +179,16 @@ Cells and biomes are adapted from [Azgaar's Fantasy Map Generator](https://githu
 
 Click a place with the hand tool to open its card next to it: name and group, coordinates and how far and which way it is from you, its note, and the text of its lorebook entry (the entry whose title matches, or the one that mentions it; macro references show as coordinates). Pick the lorebook once per map from the card. **Set as destination**, **Move me here**, **Edit** and **Copy reference** are on the card; Esc or a click on empty map closes it.
 
+Shapes get cards too: click a named shape (a river, a forest, a landmark) with the hand to see its name, kind, note and distance from you, with **Zoom to it** and **Edit**. Give a shape a note in its properties.
+
+## Search
+
+**Ctrl+F**, **/** or the magnifier in the top bar opens a search box over the map. It finds places (by name, group or note), named shapes and zones as you type; arrows pick, **Enter** goes there and opens the card, **Esc** closes.
+
+## Marker styles
+
+Each group in the Places list has a marker button: pick a shape (dot, square, diamond, triangle, star, shield, castle, port, danger) and a colour for the group's places. Subgroups inherit what they don't set, and a place can set its own shape and colour in its editor.
+
 ## Decorations
 
 Mountains, forests, hills, dunes, glaciers and volcanoes, scattered with brushes on top of the terrain. Click the **Decorations** layer to see the brushes.
@@ -232,11 +243,16 @@ Position, destination and trail are stored per chat in chat variables, so they t
 Example of the text that gets sent:
 
 ```
-[Map: Endwright]
-Current position: [-262, 118] (region Western Continent (Yanzhou)).
-Nearby: Dragonbone Graveyard 849 km NE; Frostfire Keep 1,540 km WSW; Aurora Port 1,980 km WNW.
-Destination: New Hope Port [-205, -45], 8,630 km SSE.
-Scale: 1 unit = 50 km; +X east, +Y north.
+<map_context map="Endwright">
+<current_position>[40, 40] (at Capital City of Thousand Sails, zone Central-Eastern Civilized Belt, region Eastern Continent (Aldermere))</current_position>
+<surroundings>
+Terrain: grassland.
+Coast: 562 km ENE.
+Landscape: forest 1,600 km WSW; rainforest 2,390 km SW; conifer forest 3,050 km N.
+</surroundings>
+<nearby_places>Bluewatch Village 1,120 km ENE; Tidesong Town 1,830 km SE; Wave-Lost City 2,060 km NNE</nearby_places>
+<scale>1 unit = 50 km; +X east, +Y north</scale>
+</map_context>
 ```
 
 With **Ask the model to report moves** turned on, the model is asked to end a reply with `<map-pos>x,y</map-pos>` when the party travels. The extension moves you there, adds the move to your trail, and hides the tag in the chat. Each tag is applied once per message.
@@ -247,7 +263,8 @@ With **Ask the model to report moves** turned on, the model is asked to end a re
 bun install
 bun run build      # dist/backend.js + dist/frontend.js
 bun run typecheck
-bun test
+bun test           # data and logic
+bun run test:ui    # the UI in headless Chrome or Edge (set BROWSER if it isn't found)
 ```
 
 Source layout:

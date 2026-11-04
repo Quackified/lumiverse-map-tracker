@@ -222,6 +222,30 @@ function pictureKind(id: string): Kind {
   return k
 }
 
+/** A stamp's rough outline on screen: it stands on its point, about as wide as its size. */
+export function stampBox(st: DecorStamp, p: Painter): { x0: number; y0: number; x1: number; y1: number } {
+  const sp = p.toScreen(st.x, st.y)
+  const px = st.s * p.scale()
+  const kind = KINDS[st.t]
+  if (kind?.mass) return { x0: sp.x - px, y0: sp.y - px, x1: sp.x + px, y1: sp.y + px }
+  if (kind?.flat) return { x0: sp.x - px * 0.5, y0: sp.y - px * 0.35, x1: sp.x + px * 0.5, y1: sp.y + px * 0.35 }
+  return { x0: sp.x - px * 0.5, y0: sp.y - px * 0.85, x1: sp.x + px * 0.5, y1: sp.y + px * 0.1 }
+}
+
+/** Indices of the stamps under a screen point, topmost (drawn last) first. */
+export function stampsAt(stamps: DecorStamp[], p: Painter, sx: number, sy: number): number[] {
+  const hits: { i: number; y: number; flat: boolean }[] = []
+  stamps.forEach((st, i) => {
+    const b = stampBox(st, p)
+    // Tiny stamps get a few pixels of slack so they can still be grabbed.
+    const pad = Math.max(0, 4 - (b.x1 - b.x0) / 2)
+    if (sx >= b.x0 - pad && sx <= b.x1 + pad && sy >= b.y0 - pad && sy <= b.y1 + pad) hits.push({ i, y: st.y, flat: !!KINDS[st.t]?.flat || !!KINDS[st.t]?.mass })
+  })
+  // Standing stamps draw over flat ones and masses, front (lower on the map) over back.
+  hits.sort((a, b) => (a.flat === b.flat ? a.y - b.y : a.flat ? 1 : -1))
+  return hits.map((h) => h.i)
+}
+
 export class DecorRenderer {
   draw(g: CanvasRenderingContext2D, stamps: DecorStamp[], p: Painter, viewW: number, viewH: number, opacity = 1): void {
     if (!stamps.length) return

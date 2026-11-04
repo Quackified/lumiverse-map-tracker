@@ -1,6 +1,6 @@
 {
   "name": "map-tracker",
-  "version": "0.13.2",
+  "version": "0.14.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,12 +8,14 @@
     "build:frontend": "bun build src/frontend.ts --outfile dist/frontend.js --target browser --minify",
     "build": "bun run build:backend && bun run build:frontend",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "test:ui": "bun test/ui/run.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/delaunator": "^5.0.3",
     "lumiverse-spindle-types": "^0.6.77",
+    "puppeteer-core": "^25.16.0",
     "typescript": "^5.9.3"
   },
   "dependencies": {

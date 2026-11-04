@@ -133,9 +133,9 @@ export function decorUnit(b: Bounds): number {
 }
 
 export interface BrushOptions {
-  /** Size multiplier (0.3 … 3). */
+  /** Size multiplier (0.05 … 3): the largest a stamp gets. */
   size: number
-  /** How much sizes differ (0 … 1). */
+  /** How much smaller some stamps are (0 … 1); none is bigger than `size`. */
   variation: number
   /** Packing (0.2 … 3): more stamps closer together. */
   density: number
@@ -183,7 +183,7 @@ export function brushDab(brush: DecorBrush, unit: number, opts: BrushOptions, cx
     t: pick(),
     x: Math.round(x * 100) / 100,
     y: Math.round(y * 100) / 100,
-    s: Math.round(size * (1 + opts.variation * (rnd() * 2 - 1) * 0.7) * 100) / 100,
+    s: Math.round(size * (1 - opts.variation * rnd() * 0.7) * 1000) / 1000,
     r: Math.floor(rnd() * 2 ** 31),
   })
   const out: DecorStamp[] = []

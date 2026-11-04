@@ -1319,12 +1319,17 @@ export class MapApp {
       this.decorBrush = sel.value
       if (this.panel === 'decor') this.renderSide(true)
     })
-    const slider = (label: string, key: 'size' | 'variation' | 'density', min: number, max: number, title: string) => {
-      const r = h('input', { type: 'range', min: String(min), max: String(max), step: '0.05', value: String(this.decorOpts[key]), class: 'mt-opt-range', title })
-      const out = h('span', { class: 'mt-dim mt-mono' }, this.decorOpts[key].toFixed(2))
+    // Size and density run on a log scale, so the small end gets as much of the slider as the big end.
+    const slider = (label: string, key: 'size' | 'variation' | 'density', min: number, max: number, title: string, log = false) => {
+      const toPos = (v: number) => (log ? Math.log(v / min) / Math.log(max / min) : (v - min) / (max - min))
+      const fromPos = (t: number) => (log ? min * Math.pow(max / min, t) : min + t * (max - min))
+      const show = (v: number) => (key === 'variation' ? `${Math.round(v * 100)}%` : `${v < 0.1 ? v.toFixed(2) : v.toFixed(v < 1 ? 2 : 1)}×`)
+      const r = h('input', { type: 'range', min: '0', max: '1', step: '0.005', value: String(toPos(this.decorOpts[key])), class: 'mt-opt-range', title })
+      const out = h('span', { class: 'mt-dim mt-mono' }, show(this.decorOpts[key]))
       r.addEventListener('input', () => {
-        this.decorOpts[key] = Number(r.value)
-        out.textContent = Number(r.value).toFixed(2)
+        const v = fromPos(Number(r.value))
+        this.decorOpts[key] = v
+        out.textContent = show(v)
       })
       return h('label', { class: 'mt-opt' }, h('span', { class: 'mt-dim' }, label), r, out)
     }
@@ -1335,9 +1340,9 @@ export class MapApp {
     }
     return [
       h('label', { class: 'mt-opt' }, h('img', { class: 'mt-brush-thumb', src: brushPreview(brush), alt: '' }), sel),
-      slider('Size', 'size', 0.3, 3, 'How big each stamp is'),
-      slider('Variation', 'variation', 0, 1, 'How much sizes differ'),
-      slider('Density', 'density', 0.2, 3, 'How closely stamps pack'),
+      slider('Size', 'size', 0.05, 3, 'The largest a stamp gets', true),
+      slider('Variation', 'variation', 0, 1, 'How much smaller some stamps are; none gets bigger than Size'),
+      slider('Density', 'density', 0.2, 3, 'How closely stamps pack', true),
     ]
   }
 

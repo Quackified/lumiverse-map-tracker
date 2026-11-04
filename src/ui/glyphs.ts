@@ -149,7 +149,7 @@ function crystal(g, x, y, W, H, rnd, broken) {
   ink(g, [[x - W * 0.22, y - H * 0.05], [x - W * 0.18, y - H * 0.6]], W * 0.07, '#effcff', 0.75);
   ink(g, [[mid[0], mid[1]], [x + W * 0.02, y]], W * 0.035, '#1e4b57', 0.6);
   if (!broken) ink(g, [tip, mid], W * 0.035, '#1e4b57', 0.6);
-  g.lineJoin = 'round'; g.strokeStyle = '#1e4b57'; g.lineWidth = Math.min(Math.max(1, W * 0.07), 2.8);
+  g.lineJoin = 'round'; g.strokeStyle = '#1e4b57'; g.lineWidth = Math.min(Math.max(Math.min(1, W * 0.15), W * 0.07), 2.8);
   g.beginPath(); g.moveTo(bl[0], bl[1]); for (const q of outline) g.lineTo(q[0], q[1]); g.stroke();
 }
 /** A cluster of ice spires fanning out from one root, leaning and uneven, buried in a drift. */
@@ -221,7 +221,7 @@ function inkPeak(g, x, y, W, rnd, tone) {
   const L = [x - W / 2, y], R = [x + W / 2, y], P = [px, y - H], foot = [px + W * (0.05 + rnd() * 0.1), y];
   fillPoly(g, [L, sL, jL, P, foot], tone.light);
   fillPoly(g, [P, jR, sR, R, foot], tone.dark);
-  const lw = Math.min(Math.max(1.2, W * 0.035), 2.6);
+  const lw = Math.min(Math.max(Math.min(1.2, W * 0.08), W * 0.035), 2.6);
   strokePath(g, [L, sL, jL, P, jR, sR, R], lw);
   strokePath(g, [P, [px + W * 0.03, y - H * 0.55], [foot[0] - W * 0.02, y - H * 0.1]], lw * 0.7);
   if (rnd() < 0.7) { const t = 0.3 + rnd() * 0.3; strokePath(g, [[sR[0] - W * 0.05, sR[1] + H * 0.05], [sR[0] - W * 0.02 + (R[0] - sR[0]) * t * 0.3, sR[1] + H * 0.3]], lw * 0.6); }
@@ -230,44 +230,46 @@ function inkPeak(g, x, y, W, rnd, tone) {
 /** Forest as one mass: scalloped inked edge, flat green, cupped crown marks inside. */
 function inkForest(g, pts, rnd, pal) {
   g.save(); g.strokeStyle = K;
-  for (const [x, y, r] of pts) { g.lineWidth = 2.4; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.stroke(); }
+  for (const [x, y, r] of pts) { g.lineWidth = Math.min(2.4, Math.max(0.5, r * 0.4)); g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.stroke(); }
   g.fillStyle = pal.mid; for (const [x, y, r] of pts) { g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill(); }
   const sorted = pts.slice().sort((a, b) => a[1] - b[1]);
   for (const [x, y, r, seed] of sorted) {
     const rnd2 = seed === undefined ? rnd : mulberry(seed)
     if (rnd2() < 0.18) { g.fillStyle = pal.dark; g.beginPath(); g.arc(x + r * 0.15, y + r * 0.2, r * 0.75, 0.1 * Math.PI, 0.95 * Math.PI); g.fill(); }
-    if (rnd2() < 0.3) { g.lineWidth = 1.3; g.beginPath(); g.arc(x, y + r * 0.35, r * 0.62, 1.15 * Math.PI, 1.85 * Math.PI); g.stroke(); }
+    if (rnd2() < 0.3) { g.lineWidth = Math.min(1.3, Math.max(0.4, r * 0.22)); g.beginPath(); g.arc(x, y + r * 0.35, r * 0.62, 1.15 * Math.PI, 1.85 * Math.PI); g.stroke(); }
   }
   g.restore();
 }
 function lollipop(g, x, y, s, rnd, pal) {
-  strokePath(g, [[x, y], [x, y - s * 0.55]], 1.4);
+  const lw = Math.min(1.4, Math.max(0.5, s * 0.12));
+  strokePath(g, [[x, y], [x, y - s * 0.55]], lw);
   const r = s * 0.42, cy = y - s * 0.8;
   g.fillStyle = pal.mid; g.beginPath(); g.arc(x, cy, r, 0, Math.PI * 2); g.fill();
   g.fillStyle = pal.dark; g.beginPath(); g.arc(x + r * 0.2, cy + r * 0.2, r * 0.75, 0.05 * Math.PI, 0.9 * Math.PI); g.fill();
-  g.strokeStyle = K; g.lineWidth = 1.4; g.beginPath(); g.arc(x, cy, r, 0, Math.PI * 2); g.stroke();
+  g.strokeStyle = K; g.lineWidth = lw; g.beginPath(); g.arc(x, cy, r, 0, Math.PI * 2); g.stroke();
 }
 function deadTree(g, x, y, s, rnd) {
-  strokePath(g, [[x, y], [x + s * 0.05, y - s * 0.9]], 1.6);
-  for (let i = 0; i < 4; i++) { const t = 0.35 + i * 0.15, bx = x + s * 0.05 * t, by = y - s * 0.9 * t, d = i % 2 ? 1 : -1; strokePath(g, [[bx, by], [bx + d * s * (0.2 + rnd() * 0.15), by - s * (0.15 + rnd() * 0.1)]], 1.2); }
+  const lw = Math.min(1.6, Math.max(0.5, s * 0.1));
+  strokePath(g, [[x, y], [x + s * 0.05, y - s * 0.9]], lw);
+  for (let i = 0; i < 4; i++) { const t = 0.35 + i * 0.15, bx = x + s * 0.05 * t, by = y - s * 0.9 * t, d = i % 2 ? 1 : -1; strokePath(g, [[bx, by], [bx + d * s * (0.2 + rnd() * 0.15), by - s * (0.15 + rnd() * 0.1)]], lw * 0.75); }
 }
 function inkHill(g, x, y, W, rnd, tone) {
   const H = W * (0.3 + rnd() * 0.15), P = [x + (rnd() - 0.5) * W * 0.2, y - H];
   const top = curve([x - W / 2, y], [x - W * 0.3, y - H * 0.9], [P[0] - W * 0.12, P[1]], P, 8).concat(curve(P, [P[0] + W * 0.14, P[1]], [x + W * 0.32, y - H * 0.6], [x + W / 2, y], 8));
   fillPoly(g, top, tone.light);
   fillPoly(g, curve(P, [P[0] + W * 0.14, P[1]], [x + W * 0.32, y - H * 0.6], [x + W / 2, y], 8).concat([[P[0] + W * 0.08, y]]), tone.dark);
-  strokePath(g, top.slice(0, 13), Math.min(Math.max(1.2, W * 0.04), 2.4));
+  strokePath(g, top.slice(0, 13), Math.min(Math.max(Math.min(1.2, W * 0.08), W * 0.04), 2.4));
 }
 function inkCliff(g, x, y, L, rnd) {
   const pts = []; let yy = y;
   for (let i = 0; i <= 12; i++) { yy += (rnd() - 0.5) * L * 0.04; pts.push([x - L / 2 + (L * i) / 12, yy + Math.sin(i * 1.3 + rnd()) * L * 0.02]); }
   const band = pts.map(([px, py], i) => [px + L * 0.012, py + L * (0.04 + 0.05 * Math.sin((i / 12) * Math.PI))]);
   fillPoly(g, pts.concat(band.reverse()), '#7c6741');
-  strokePath(g, pts, 2.6);
+  strokePath(g, pts, Math.min(2.6, Math.max(0.6, L * 0.08)));
 }
 function lavaCap(g, P, W, rnd) {
   const c = [[P[0] - W * 0.12, P[1] + W * 0.12], [P[0] - W * 0.04, P[1] + W * 0.02], [P[0] + W * 0.06, P[1] + W * 0.03], [P[0] + W * 0.14, P[1] + W * 0.14], [P[0] + W * 0.03, P[1] + W * 0.09]];
-  fillPoly(g, c, '#e2461d'); fillPoly(g, c.slice(1, 4).concat([[P[0] + W * 0.02, P[1] + W * 0.06]]), '#ff8a3a'); strokePath(g, c, 1.6, K, true);
+  fillPoly(g, c, '#e2461d'); fillPoly(g, c.slice(1, 4).concat([[P[0] + W * 0.02, P[1] + W * 0.06]]), '#ff8a3a'); strokePath(g, c, Math.min(1.6, Math.max(0.5, W * 0.06)), K, true);
 }
 /** A glacier shard: thin, tilted, two flat cyans, inked. */
 function shard(g, x, y, W, H, a, rnd) {
@@ -319,7 +321,7 @@ function inkVolcano(g, x, y, W, rnd, active) {
   const right = [[x, y - H * 1.01], TR, ...curve(TR, [x + W * 0.18, y - H * 0.7], [x + W * 0.3, y - H * 0.25], R, 8).slice(1), foot];
   fillPoly(g, left, '#857d77');
   fillPoly(g, right, '#524b46');
-  const lw = Math.min(Math.max(1.3, W * 0.03), 2.6);
+  const lw = Math.min(Math.max(Math.min(1.3, W * 0.08), W * 0.03), 2.6);
   strokePath(g, curve(L, [x - W * 0.3, y - H * 0.25], [x - W * 0.18, y - H * 0.7], TL, 8), lw);
   strokePath(g, curve(TR, [x + W * 0.18, y - H * 0.7], [x + W * 0.3, y - H * 0.25], R, 8), lw);
   for (let i = 0; i < 3; i++) strokePath(g, [[x + cw * (0.4 + i * 0.5), y - H * 0.88], [x + W * (0.1 + i * 0.09), y - H * (0.3 - i * 0.06)]], lw * 0.55);

@@ -624,7 +624,7 @@ export class MapView {
         return
       }
       if (g?.mode === 'land') {
-        if (this.tool === 'lbrush') {
+        if (this.tool === 'lbrush' || this.tool === 'lrefine') {
           const w = this.toWorld(p.x, p.y)
           this.hooks.onLand(this.tool, 'move', w.x, w.y, e)
         }

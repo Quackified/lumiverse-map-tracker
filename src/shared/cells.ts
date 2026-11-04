@@ -104,6 +104,56 @@ export interface Graph {
 
 /** How much finer cells are inside fine areas (per side: 3 → nine times as many). */
 export const FINE_FACTOR = 3
+/** Width of the transition band around a fine area, as a share of its radius. */
+const BAND = 0.8
+
+/**
+ * Lloyd relaxation for the points `movable` picks: each moves to the average of
+ * its cell's corners (the circumcentres around it). Points `n` and up (the
+ * boundary) stay put; moved points stay inside the bounds.
+ */
+function relaxNear(pts: number[], n: number, bounds: Bounds, movable: (x: number, y: number) => boolean, steps: number): void {
+  const next = (e: number) => (e % 3 === 2 ? e - 2 : e + 1)
+  for (let it = 0; it < steps; it++) {
+    const coords = Float64Array.from(pts)
+    const { triangles, halfedges } = new Delaunator(coords)
+    const nt = triangles.length / 3
+    const cc = new Float64Array(nt * 2)
+    for (let t = 0; t < nt; t++) {
+      const a = triangles[3 * t]
+      const b = triangles[3 * t + 1]
+      const c = triangles[3 * t + 2]
+      const [ax, ay, bx, by, cx, cy] = [coords[2 * a], coords[2 * a + 1], coords[2 * b], coords[2 * b + 1], coords[2 * c], coords[2 * c + 1]]
+      const D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+      const ad = ax * ax + ay * ay
+      const bd = bx * bx + by * by
+      const cd = cx * cx + cy * cy
+      cc[2 * t] = (ad * (by - cy) + bd * (cy - ay) + cd * (ay - by)) / D
+      cc[2 * t + 1] = (ad * (cx - bx) + bd * (ax - cx) + cd * (bx - ax)) / D
+    }
+    const done = new Uint8Array(n)
+    for (let e = 0; e < triangles.length; e++) {
+      const p = triangles[next(e)]
+      if (p >= n || done[p]) continue
+      done[p] = 1
+      if (!movable(coords[2 * p], coords[2 * p + 1])) continue
+      let sx = 0
+      let sy = 0
+      let k = 0
+      let incoming = e
+      do {
+        const t = Math.floor(incoming / 3)
+        sx += cc[2 * t]
+        sy += cc[2 * t + 1]
+        k++
+        incoming = halfedges[next(incoming)]
+      } while (incoming !== -1 && incoming !== e && k < 24)
+      if (incoming !== e || !k) continue
+      pts[2 * p] = Math.min(bounds.maxX, Math.max(bounds.minX, sx / k))
+      pts[2 * p + 1] = Math.min(bounds.maxY, Math.max(bounds.minY, sy / k))
+    }
+  }
+}
 
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0
@@ -144,13 +194,23 @@ export function buildGraph(bounds: Bounds, desired: number, seed: number, fine: 
   const jx = 0.45 * dx
   const jy = 0.45 * dy
   const inFine = (x: number, y: number) => fine.some((f) => (x - f.x) ** 2 + (y - f.y) ** 2 <= f.r * f.r)
+  /** 0 at a fine area's edge rising to 1 a band's width out (above 1: outside the band). */
+  const bandAt = (x: number, y: number) => {
+    let t = Infinity
+    for (const f of fine) t = Math.min(t, (Math.hypot(x - f.x, y - f.y) - f.r) / (f.r * BAND))
+    return t
+  }
   const slot = new Int32Array(cellsX * cellsY).fill(-1)
+  const baseX = new Float64Array(cellsX * cellsY)
+  const baseY = new Float64Array(cellsX * cellsY)
   const pts: number[] = []
   for (let row = 0; row < cellsY; row++) {
     for (let col = 0; col < cellsX; col++) {
       // Draw the jitter even for skipped slots, so the rest of the grid stays put.
       const x = bounds.minX + (col + 0.5) * dx + (rand() * 2 - 1) * jx
       const y = bounds.minY + (row + 0.5) * dy + (rand() * 2 - 1) * jy
+      baseX[row * cellsX + col] = x
+      baseY[row * cellsX + col] = y
       if (fine.length && inFine(x, y)) continue
       slot[row * cellsX + col] = pts.length / 2
       pts.push(x, y)
@@ -167,18 +227,35 @@ export function buildGraph(bounds: Bounds, desired: number, seed: number, fine: 
       return ((h ^ (h >>> 16)) >>> 0) / 4294967296
     }
     const seen = new Set<number>()
+    // Clear of the coarse points kept around it, so the band doesn't make slivers.
+    const clear = (x: number, y: number) => {
+      const sc = Math.floor((x - bounds.minX) / dx)
+      const sr = Math.floor((y - bounds.minY) / dy)
+      for (let r = sr - 1; r <= sr + 1; r++)
+        for (let c = sc - 1; c <= sc + 1; c++) {
+          if (r < 0 || c < 0 || r >= cellsY || c >= cellsX) continue
+          const i = r * cellsX + c
+          if (pts[2 * slot[i]] === baseX[i] && Math.hypot(baseX[i] - x, baseY[i] - y) < fx * 0.6) return false
+        }
+      return true
+    }
     for (const f of fine) {
-      const c0 = Math.max(0, Math.floor((f.x - f.r - bounds.minX) / fx))
-      const c1 = Math.min(cellsX * FINE_FACTOR - 1, Math.ceil((f.x + f.r - bounds.minX) / fx))
-      const r0 = Math.max(0, Math.floor((f.y - f.r - bounds.minY) / fy))
-      const r1 = Math.min(cellsY * FINE_FACTOR - 1, Math.ceil((f.y + f.r - bounds.minY) / fy))
+      const reach = f.r * (1 + BAND)
+      const c0 = Math.max(0, Math.floor((f.x - reach - bounds.minX) / fx))
+      const c1 = Math.min(cellsX * FINE_FACTOR - 1, Math.ceil((f.x + reach - bounds.minX) / fx))
+      const r0 = Math.max(0, Math.floor((f.y - reach - bounds.minY) / fy))
+      const r1 = Math.min(cellsY * FINE_FACTOR - 1, Math.ceil((f.y + reach - bounds.minY) / fy))
       for (let row = r0; row <= r1; row++)
         for (let col = c0; col <= c1; col++) {
           const key = row * cellsX * FINE_FACTOR + col
           if (seen.has(key)) continue
           const x = bounds.minX + (col + 0.5) * fx + (hash(col, row, 1) * 2 - 1) * 0.45 * fx
           const y = bounds.minY + (row + 0.5) * fy + (hash(col, row, 2) * 2 - 1) * 0.45 * fy
-          if (!inFine(x, y)) continue
+          if (!inFine(x, y)) {
+            // The band around a fine area: fewer and fewer extra points going out, so cells grow gradually.
+            const t = bandAt(x, y)
+            if (t >= 1 || hash(col, row, 3) > 0.3 * (1 - t) || !clear(x, y)) continue
+          }
           seen.add(key)
           const s = Math.min(cellsY - 1, Math.floor(row / FINE_FACTOR)) * cellsX + Math.min(cellsX - 1, Math.floor(col / FINE_FACTOR))
           if (slot[s] < 0) slot[s] = pts.length / 2
@@ -198,6 +275,9 @@ export function buildGraph(bounds: Bounds, desired: number, seed: number, fine: 
     const y = bounds.minY + (row + 0.5) * dy
     pts.push(bounds.minX - 0.5 * dx, y, bounds.maxX + 0.5 * dx, y)
   }
+  // Even out the cells in and around fine areas: a couple of steps moving each
+  // point to the middle of its cell (Lloyd), so sizes change smoothly.
+  if (fine.length) relaxNear(pts, n, bounds, (x, y) => bandAt(x, y) < 1.4, 2)
   const coords = Float64Array.from(pts)
   const del = new Delaunator(coords)
   const { triangles, halfedges } = del

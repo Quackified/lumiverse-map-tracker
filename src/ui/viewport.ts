@@ -19,8 +19,8 @@ import { LandRenderer } from './landmap'
 import { DecorRenderer } from './decor'
 import { biomeName } from '../shared/cells'
 
-export type LandTool = 'lbrush' | 'lfill' | 'llasso' | 'lpick' | 'lsample' | 'lwand' | 'lcoast' | 'lrefine'
-const LAND_TOOLS = new Set<string>(['lbrush', 'lfill', 'llasso', 'lpick', 'lsample', 'lwand', 'lcoast', 'lrefine'])
+export type LandTool = 'lbrush' | 'lfill' | 'llasso' | 'lpick' | 'lsample' | 'lwand' | 'lcoast'
+const LAND_TOOLS = new Set<string>(['lbrush', 'lfill', 'llasso', 'lpick', 'lsample', 'lwand', 'lcoast'])
 export const isLandTool = (t: string): t is LandTool => LAND_TOOLS.has(t)
 /** Tools that read the picture: it comes to the front while they're active. */
 const PICTURE_TOOLS = new Set<string>(['lsample', 'lwand', 'lcoast', 'scut'])
@@ -149,8 +149,6 @@ export class MapView {
   snapOn = true
   /** Where the last snap landed on a place or shape point, to mark it. */
   private snapMark: { x: number; y: number } | null = null
-  /** Fine areas of the detail-brush stroke in progress, shown until it's applied. */
-  pendingFine: { x: number; y: number; r: number }[] | null = null
   /** Outline being drawn with the terrain lasso, in world coordinates. */
   private lasso: [number, number][] | null = null
 
@@ -624,7 +622,7 @@ export class MapView {
         return
       }
       if (g?.mode === 'land') {
-        if (this.tool === 'lbrush' || this.tool === 'lrefine') {
+        if (this.tool === 'lbrush') {
           const w = this.toWorld(p.x, p.y)
           this.hooks.onLand(this.tool, 'move', w.x, w.y, e)
         }
@@ -1069,29 +1067,7 @@ export class MapView {
         g.stroke()
         g.setLineDash([])
       }
-      if (this.tool === 'lrefine' && p.land) {
-        // Where cells are finer: existing areas dashed, the stroke in progress shaded.
-        g.save()
-        g.strokeStyle = t.accent
-        g.lineWidth = 1.2
-        g.setLineDash([4, 4])
-        for (const f of p.land.fine ?? []) {
-          const c = this.toScreen(f.x, f.y)
-          g.beginPath()
-          g.arc(c.x, c.y, f.r * this.view.s, 0, Math.PI * 2)
-          g.stroke()
-        }
-        g.setLineDash([])
-        g.fillStyle = 'rgba(255,255,255,0.18)'
-        for (const f of this.pendingFine ?? []) {
-          const c = this.toScreen(f.x, f.y)
-          g.beginPath()
-          g.arc(c.x, c.y, f.r * this.view.s, 0, Math.PI * 2)
-          g.fill()
-        }
-        g.restore()
-      }
-      if ((this.tool === 'lbrush' || this.tool === 'lrefine' || isDecorTool(this.tool)) && this.hover && (p.land || isDecorTool(this.tool))) {
+      if ((this.tool === 'lbrush' || isDecorTool(this.tool)) && this.hover && (p.land || isDecorTool(this.tool))) {
         g.beginPath()
         g.arc(this.hover.sx, this.hover.sy, this.brushPx, 0, Math.PI * 2)
         g.strokeStyle = t.text

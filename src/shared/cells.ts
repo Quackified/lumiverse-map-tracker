@@ -1,5 +1,5 @@
 import Delaunator from 'delaunator'
-import type { Bounds, FineArea, LandGrid } from './types'
+import type { Bounds, LandGrid } from './types'
 
 // The land grid: the world as a few thousand irregular cells (a jittered lattice
 // and its Voronoi diagram), each holding a biome. Only the biome bytes are
@@ -96,63 +96,6 @@ export interface Graph {
   vv: Int32Array
   /** The 3 points (cells or boundary points) around each vertex. */
   vc: Int32Array
-  /** A real cell in each lattice slot, where a cell lookup starts. */
-  slot: Int32Array
-  /** Smallest cell spacing: a third of the lattice where there are fine areas. */
-  fine: number
-}
-
-/** How much finer cells are inside fine areas (per side: 3 → nine times as many). */
-export const FINE_FACTOR = 3
-/** Width of the transition band around a fine area, as a share of its radius. */
-const BAND = 0.8
-
-/**
- * Lloyd relaxation for the points `movable` picks: each moves to the average of
- * its cell's corners (the circumcentres around it). Points `n` and up (the
- * boundary) stay put; moved points stay inside the bounds.
- */
-function relaxNear(pts: number[], n: number, bounds: Bounds, movable: (x: number, y: number) => boolean, steps: number): void {
-  const next = (e: number) => (e % 3 === 2 ? e - 2 : e + 1)
-  for (let it = 0; it < steps; it++) {
-    const coords = Float64Array.from(pts)
-    const { triangles, halfedges } = new Delaunator(coords)
-    const nt = triangles.length / 3
-    const cc = new Float64Array(nt * 2)
-    for (let t = 0; t < nt; t++) {
-      const a = triangles[3 * t]
-      const b = triangles[3 * t + 1]
-      const c = triangles[3 * t + 2]
-      const [ax, ay, bx, by, cx, cy] = [coords[2 * a], coords[2 * a + 1], coords[2 * b], coords[2 * b + 1], coords[2 * c], coords[2 * c + 1]]
-      const D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
-      const ad = ax * ax + ay * ay
-      const bd = bx * bx + by * by
-      const cd = cx * cx + cy * cy
-      cc[2 * t] = (ad * (by - cy) + bd * (cy - ay) + cd * (ay - by)) / D
-      cc[2 * t + 1] = (ad * (cx - bx) + bd * (ax - cx) + cd * (bx - ax)) / D
-    }
-    const done = new Uint8Array(n)
-    for (let e = 0; e < triangles.length; e++) {
-      const p = triangles[next(e)]
-      if (p >= n || done[p]) continue
-      done[p] = 1
-      if (!movable(coords[2 * p], coords[2 * p + 1])) continue
-      let sx = 0
-      let sy = 0
-      let k = 0
-      let incoming = e
-      do {
-        const t = Math.floor(incoming / 3)
-        sx += cc[2 * t]
-        sy += cc[2 * t + 1]
-        k++
-        incoming = halfedges[next(incoming)]
-      } while (incoming !== -1 && incoming !== e && k < 24)
-      if (incoming !== e || !k) continue
-      pts[2 * p] = Math.min(bounds.maxX, Math.max(bounds.minX, sx / k))
-      pts[2 * p + 1] = Math.min(bounds.maxY, Math.max(bounds.minY, sy / k))
-    }
-  }
 }
 
 function mulberry32(seed: number): () => number {
@@ -168,20 +111,20 @@ function mulberry32(seed: number): () => number {
 
 const graphCache = new Map<string, Graph>()
 
-/** The grid's geometry, cached by bounds, count, seed and fine areas. */
-export function graphFor(grid: Pick<LandGrid, 'bounds' | 'cells' | 'seed' | 'fine'>): Graph {
+/** The grid's geometry, cached by bounds, count and seed. */
+export function graphFor(grid: Pick<LandGrid, 'bounds' | 'cells' | 'seed'>): Graph {
   const b = grid.bounds
-  const key = `${b.minX},${b.maxX},${b.minY},${b.maxY}|${grid.cells}|${grid.seed}|${(grid.fine ?? []).map((f) => `${f.x},${f.y},${f.r}`).join(';')}`
+  const key = `${b.minX},${b.maxX},${b.minY},${b.maxY}|${grid.cells}|${grid.seed}`
   let g = graphCache.get(key)
   if (!g) {
-    g = buildGraph(b, grid.cells, grid.seed, grid.fine)
+    g = buildGraph(b, grid.cells, grid.seed)
     if (graphCache.size > 4) graphCache.clear()
     graphCache.set(key, g)
   }
   return g
 }
 
-export function buildGraph(bounds: Bounds, desired: number, seed: number, fine: FineArea[] = []): Graph {
+export function buildGraph(bounds: Bounds, desired: number, seed: number): Graph {
   const w = bounds.maxX - bounds.minX
   const h = bounds.maxY - bounds.minY
   const spacing = Math.sqrt((w * h) / Math.max(16, desired))
@@ -193,79 +136,13 @@ export function buildGraph(bounds: Bounds, desired: number, seed: number, fine: 
   // 0.9 of half a slot, as in FMG's classic grid: neighbours never coincide.
   const jx = 0.45 * dx
   const jy = 0.45 * dy
-  const inFine = (x: number, y: number) => fine.some((f) => (x - f.x) ** 2 + (y - f.y) ** 2 <= f.r * f.r)
-  /** 0 at a fine area's edge rising to 1 a band's width out (above 1: outside the band). */
-  const bandAt = (x: number, y: number) => {
-    let t = Infinity
-    for (const f of fine) t = Math.min(t, (Math.hypot(x - f.x, y - f.y) - f.r) / (f.r * BAND))
-    return t
-  }
-  const slot = new Int32Array(cellsX * cellsY).fill(-1)
-  const baseX = new Float64Array(cellsX * cellsY)
-  const baseY = new Float64Array(cellsX * cellsY)
+  const n = cellsX * cellsY
   const pts: number[] = []
   for (let row = 0; row < cellsY; row++) {
     for (let col = 0; col < cellsX; col++) {
-      // Draw the jitter even for skipped slots, so the rest of the grid stays put.
-      const x = bounds.minX + (col + 0.5) * dx + (rand() * 2 - 1) * jx
-      const y = bounds.minY + (row + 0.5) * dy + (rand() * 2 - 1) * jy
-      baseX[row * cellsX + col] = x
-      baseY[row * cellsX + col] = y
-      if (fine.length && inFine(x, y)) continue
-      slot[row * cellsX + col] = pts.length / 2
-      pts.push(x, y)
+      pts.push(bounds.minX + (col + 0.5) * dx + (rand() * 2 - 1) * jx, bounds.minY + (row + 0.5) * dy + (rand() * 2 - 1) * jy)
     }
   }
-  // Fine areas: a global lattice three times finer, jittered from a hash, so
-  // overlapping areas share their points and each point is stable.
-  if (fine.length) {
-    const fx = dx / FINE_FACTOR
-    const fy = dy / FINE_FACTOR
-    const hash = (a: number, b: number, k: number) => {
-      let h = Math.imul(a, 374761393) + Math.imul(b, 668265263) + Math.imul(seed ^ k, 982451653)
-      h = Math.imul(h ^ (h >>> 13), 1274126177)
-      return ((h ^ (h >>> 16)) >>> 0) / 4294967296
-    }
-    const seen = new Set<number>()
-    // Clear of the coarse points kept around it, so the band doesn't make slivers.
-    const clear = (x: number, y: number) => {
-      const sc = Math.floor((x - bounds.minX) / dx)
-      const sr = Math.floor((y - bounds.minY) / dy)
-      for (let r = sr - 1; r <= sr + 1; r++)
-        for (let c = sc - 1; c <= sc + 1; c++) {
-          if (r < 0 || c < 0 || r >= cellsY || c >= cellsX) continue
-          const i = r * cellsX + c
-          if (pts[2 * slot[i]] === baseX[i] && Math.hypot(baseX[i] - x, baseY[i] - y) < fx * 0.6) return false
-        }
-      return true
-    }
-    for (const f of fine) {
-      const reach = f.r * (1 + BAND)
-      const c0 = Math.max(0, Math.floor((f.x - reach - bounds.minX) / fx))
-      const c1 = Math.min(cellsX * FINE_FACTOR - 1, Math.ceil((f.x + reach - bounds.minX) / fx))
-      const r0 = Math.max(0, Math.floor((f.y - reach - bounds.minY) / fy))
-      const r1 = Math.min(cellsY * FINE_FACTOR - 1, Math.ceil((f.y + reach - bounds.minY) / fy))
-      for (let row = r0; row <= r1; row++)
-        for (let col = c0; col <= c1; col++) {
-          const key = row * cellsX * FINE_FACTOR + col
-          if (seen.has(key)) continue
-          const x = bounds.minX + (col + 0.5) * fx + (hash(col, row, 1) * 2 - 1) * 0.45 * fx
-          const y = bounds.minY + (row + 0.5) * fy + (hash(col, row, 2) * 2 - 1) * 0.45 * fy
-          if (!inFine(x, y)) {
-            // The band around a fine area: fewer and fewer extra points going out, so cells grow gradually.
-            const t = bandAt(x, y)
-            if (t >= 1 || hash(col, row, 3) > 0.3 * (1 - t) || !clear(x, y)) continue
-          }
-          seen.add(key)
-          const s = Math.min(cellsY - 1, Math.floor(row / FINE_FACTOR)) * cellsX + Math.min(cellsX - 1, Math.floor(col / FINE_FACTOR))
-          if (slot[s] < 0) slot[s] = pts.length / 2
-          pts.push(x, y)
-        }
-    }
-  }
-  const n = pts.length / 2
-  // A slot whose point was skipped and got no fine point starts lookups at a neighbour's.
-  for (let i = 0; i < slot.length; i++) if (slot[i] < 0) slot[i] = slot[Math.max(0, i - 1)] >= 0 ? slot[Math.max(0, i - 1)] : 0
   // Pseudo-points one slot outside the edge clip the outer cells; they get no cells of their own.
   for (let col = -1; col <= cellsX; col++) {
     const x = bounds.minX + (col + 0.5) * dx
@@ -275,9 +152,6 @@ export function buildGraph(bounds: Bounds, desired: number, seed: number, fine: 
     const y = bounds.minY + (row + 0.5) * dy
     pts.push(bounds.minX - 0.5 * dx, y, bounds.maxX + 0.5 * dx, y)
   }
-  // Even out the cells in and around fine areas: a couple of steps moving each
-  // point to the middle of its cell (Lloyd), so sizes change smoothly.
-  if (fine.length) relaxNear(pts, n, bounds, (x, y) => bandAt(x, y) < 1.4, 2)
   const coords = Float64Array.from(pts)
   const del = new Delaunator(coords)
   const { triangles, halfedges } = del
@@ -329,14 +203,14 @@ export function buildGraph(bounds: Bounds, desired: number, seed: number, fine: 
     c[i] ??= []
     v[i] ??= []
   }
-  return { n, points: coords.slice(0, 2 * n), bounds, cellsX, cellsY, dx, dy, c, v, vp, vv, vc, slot, fine: fine.length ? Math.max(dx, dy) / FINE_FACTOR : Math.max(dx, dy) }
+  return { n, points: coords.slice(0, 2 * n), bounds, cellsX, cellsY, dx, dy, c, v, vp, vv, vc }
 }
 
 /** The cell containing (x, y): the lattice slot, then the closest neighbour until none is closer. */
 export function findCell(g: Graph, x: number, y: number): number {
   const col = Math.max(0, Math.min(g.cellsX - 1, Math.floor((x - g.bounds.minX) / g.dx)))
   const row = Math.max(0, Math.min(g.cellsY - 1, Math.floor((y - g.bounds.minY) / g.dy)))
-  let cell = g.slot[row * g.cellsX + col]
+  let cell = row * g.cellsX + col
   const d2 = (i: number) => (g.points[2 * i] - x) ** 2 + (g.points[2 * i + 1] - y) ** 2
   let best = d2(cell)
   for (let moved = true; moved; ) {
@@ -478,34 +352,6 @@ export function biomesOf(grid: LandGrid, g: Graph): Uint8Array {
   return a
 }
 
-/**
- * The grid with different fine areas: rebuilt, each new cell taking the biome
- * under it in the old grid, so the painting stays where it was.
- */
-export function refineGrid(old: LandGrid, fine: FineArea[]): LandGrid {
-  const g0 = graphFor(old)
-  const b0 = biomesOf(old, g0)
-  const next: LandGrid = { ...old, fine: fine.length ? fine : undefined }
-  const g1 = graphFor(next)
-  const out = new Uint8Array(g1.n)
-  for (let i = 0; i < g1.n; i++) out[i] = b0[findCell(g0, g1.points[2 * i], g1.points[2 * i + 1])]
-  return { ...next, biome: encodeBytes(out) }
-}
-
-/** Cells a fine area would add, roughly: its area at nine times the lattice density, less what it replaces. */
-export function fineCellCount(grid: Pick<LandGrid, 'bounds' | 'cells'>, fine: FineArea[]): number {
-  const area = (grid.bounds.maxX - grid.bounds.minX) * (grid.bounds.maxY - grid.bounds.minY)
-  const per = grid.cells / Math.max(1e-9, area)
-  // Overlaps counted once, approximately, by sampling the union on a coarse grid.
-  let covered = 0
-  if (fine.length) {
-    const step = Math.sqrt(area) / 200
-    for (let x = grid.bounds.minX; x < grid.bounds.maxX; x += step)
-      for (let y = grid.bounds.minY; y < grid.bounds.maxY; y += step) if (fine.some((f) => (x - f.x) ** 2 + (y - f.y) ** 2 <= f.r * f.r)) covered += step * step
-  }
-  return Math.round(covered * per * (FINE_FACTOR * FINE_FACTOR - 1))
-}
-
 /** A new grid over `bounds`, every cell `fill` (unpainted unless told otherwise). */
 export function newGrid(bounds: Bounds, cells: number, seed = Math.floor(Math.random() * 2 ** 31), fill = EMPTY): LandGrid {
   const g = buildGraph(bounds, cells, seed)
@@ -558,7 +404,7 @@ export function resampleGrid(old: LandGrid, bounds: Bounds, cells: number): Land
     const y = g1.points[2 * i + 1]
     out[i] = x >= ob.minX && x <= ob.maxX && y >= ob.minY && y <= ob.maxY ? b0[findCell(g0, x, y)] : EMPTY
   }
-  return { ...old, bounds: { ...bounds }, cells: next.cells, seed: next.seed, fine: undefined, biome: encodeBytes(out) }
+  return { ...old, bounds: { ...bounds }, cells: next.cells, seed: next.seed, biome: encodeBytes(out) }
 }
 
 // ── Clean-up ────────────────────────────────────────────────────────────────

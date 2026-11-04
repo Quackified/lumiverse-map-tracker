@@ -155,8 +155,6 @@ export interface LandGrid {
   coast?: 'soft' | 'ink'
   /** Blend biome colours softly into each other, with gentle light and dark shading, instead of crisp cells. */
   blend?: boolean
-  /** Areas painted with the detail brush, where cells are three times finer (for islets, straits, thin rivers). */
-  fine?: FineArea[]
 }
 
 export interface LayerSettings {
@@ -329,12 +327,5 @@ export interface DecorStamp {
   x: number
   y: number
   s: number
-  r: number
-}
-
-/** A circle of finer cells in a land grid. */
-export interface FineArea {
-  x: number
-  y: number
   r: number
 }

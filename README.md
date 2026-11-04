@@ -38,7 +38,6 @@ The layout follows image editors such as Photoshop or Affinity:
   | Draw zone | Z | | Biome lasso | J |
   | Decoration brush | Q | | Magic wand | W |
   | Decoration eraser | E | | Biome eyedropper | I |
-  | | | | Detail brush | K |
 
   Clicking a tool always selects it; Esc returns to the hand.
 - **Snapping** (magnet in the top bar, on by default): shapes snap to nearby places and shape points (a small square marks the hit), otherwise to whole steps that suit the zoom, when moving, scaling, dragging a point or drawing. Hold **Ctrl** to place freely. **Shift** draws at 15° angles and keeps proportions when scaling from a corner; **Alt** scales from the centre.
@@ -164,7 +163,6 @@ Once places live on the map, the coordinates written into entries can point at i
   - While these tools are active the picture comes to the front, see-through, so you can see what you're clicking and what's painted.
   - Crop the picture to the map first, or its frame is read as land.
 - **Colour samples (advanced):** pick a biome, click **Pick colour**, and click the picture where it shows that biome (the picture comes to the front while picking). Add a sample for each look: the sea, each forest colour, sand, snow, rock. **Generate** gives every cell on the picture the biome of the nearest sample colour. **Tolerance** leaves colours unlike every sample (labels, ships, ink) to their neighbours; **Smoothing** clears speckle; **Min island** merges tiny islands and lakes. Crop the picture to the map itself first, or its frame becomes land; any leftovers are one Fill click away.
-- **Detail brush** (K): paint where cells should be three times finer (nine times as many), so islets, narrow straits and thin rivers don't merge with their neighbours. Cells grow back to normal size gradually around each area instead of meeting the coarse grid at a hard edge. The painting stays where it was; Alt+drag removes fine areas, and **Remove fine areas** evens the grid out again. Changing the overall Detail or the canvas size clears fine areas.
 - **Colour** (Terrain properties): **Crisp cells**, or **Blended, painterly**: biome colours fade into each other over a few cells, with soft light and dark grain fixed to the world.
 - **Coast** (Terrain properties): a soft shallow-water glow, or **Inked, with water hatching**: a bold black shoreline with short horizontal strokes in the water, densest against the shore.
 - **Display:** terrain symbols on or off, **Picture on top** to compare against the picture while painting, and **Detail** (Coarse ~4,000 to Ultra ~80,000 cells; changing it keeps the painting). Opacity is on the Terrain layer row. **Clear terrain** goes back to fully unpainted.

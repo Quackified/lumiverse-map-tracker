@@ -53,7 +53,7 @@ export class LandRenderer {
   private built: Built | null = null
 
   private build(grid: LandGrid): Built {
-    const key = `${grid.bounds.minX},${grid.bounds.maxX},${grid.bounds.minY},${grid.bounds.maxY}|${grid.cells}|${grid.seed}|${(grid.fine ?? []).length}|${grid.biome.length}:${grid.biome}`
+    const key = `${grid.bounds.minX},${grid.bounds.maxX},${grid.bounds.minY},${grid.bounds.maxY}|${grid.cells}|${grid.seed}|${grid.biome.length}:${grid.biome}`
     if (this.built?.key === key) return this.built
     const graph = graphFor(grid)
     const biomes = biomesOf(grid, graph)
@@ -90,7 +90,7 @@ export class LandRenderer {
       }
       regions.push({ biome, path, minX, minY, maxX, maxY })
     }
-    this.built = { key, graph, biomes, coast, ocean, lakes, regions, cell: graph.fine }
+    this.built = { key, graph, biomes, coast, ocean, lakes, regions, cell: Math.max(graph.dx, graph.dy) }
     return this.built
   }
 

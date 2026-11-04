@@ -6,7 +6,6 @@ import { mergeInto, newProfile, parseCoordinateText, slug, type ParseResult } fr
 import { VAR_NAME_RE, isMoved, movePoint, placeRef, placeText, placesVarName, revertPoint } from '../shared/places'
 import { applyRefs, findCoords, guessName, resolveRefs, type CoordHit } from '../shared/convert'
 import type {
-  FineArea,
   DecorStamp,
   StampAsset,
   BackendMessage,
@@ -34,7 +33,6 @@ import { cutOut, sourceFrom, trimmed } from './stampcut'
 import type { DecorTool } from './viewport'
 import { DENSITY_PRESETS, hasSymbols } from './terrain'
 import { BIOME_GROUPS, biomeTile } from './biomeicons'
-import { fineCellCount, refineGrid } from '../shared/cells'
 import { BIOMES, DETAIL, MAX_CELLS, resampleGrid, cellsInRings, regionRings, EMPTY, DEFAULT_CELLS, LAKE, OCEAN, DEFAULT_LAND, biomeColor, biomeName, biomesOf, cellsWithin, encodeBytes, findCell, floodCells, graphFor, isWater, newGrid } from '../shared/cells'
 import { colorAt, detectLandmass, makeSampler, seedFromImage, wandMask, voteCells, type Sampler } from './landmap'
 import { isLandTool, type LandTool } from './viewport'
@@ -77,7 +75,6 @@ const RAIL: { tool: Tool; icon: IconName; label: string; key: string }[][] = [
     { tool: 'llasso', icon: 'lasso', label: 'Biome lasso', key: 'j' },
     { tool: 'lwand', icon: 'wand', label: 'Magic wand (from the picture)', key: 'w' },
     { tool: 'lpick', icon: 'dropper', label: 'Biome eyedropper', key: 'i' },
-    { tool: 'lrefine', icon: 'finegrid', label: 'Detail brush (finer cells)', key: 'k' },
   ],
   [
     { tool: 'dbrush', icon: 'stamp', label: 'Decoration brush', key: 'q' },
@@ -117,7 +114,6 @@ const TOOL_PANEL: Partial<Record<Tool, Panel>> = {
   lsample: 'land',
   lwand: 'land',
   lcoast: 'land',
-  lrefine: 'land',
   dbrush: 'decor',
   derase: 'decor',
   scut: 'decor',
@@ -142,7 +138,6 @@ const TOOL_HINT: Partial<Record<Tool, string>> = {
   lfill: 'Click inside a shape to fill the shape, or anywhere else to fill the connected area. Shift+click always fills the connected area.',
   llasso: 'Drag around an area: everything inside becomes the selected biome.',
   lpick: 'Click the terrain to pick its biome, then carry on painting.',
-  lrefine: 'Paint where cells should be three times finer, for islets, straits and thin rivers. Alt+drag removes fine areas.',
   dbrush: 'Drag to scatter the brush; click to place one. Size, variation and density are in the options bar.',
   derase: 'Drag over decorations to remove them.',
   scut: 'Drag a box around something on the picture (a mountain, a tree, a castle) to make it a stamp.',
@@ -249,8 +244,6 @@ export class MapApp {
   private landSeed = { tolerance: 120, smooth: 1, minRegion: 6 }
   private landStroke: Uint8Array | null = null
   private landFrame = 0
-  /** Fine areas of the detail-brush stroke in progress. */
-  private refineStroke: FineArea[] | null = null
   /** The paint tool to go back to after the eyedropper. */
   private lastPaintTool: LandTool = 'lbrush'
   /** Fill inside the shape under the click, when there is one. */
@@ -1249,8 +1242,8 @@ export class MapApp {
       swatch.style.background = biomeColor(this.landBiome, grid)
       if (this.panel === 'land') this.renderSide(true)
     })
-    const out: HTMLElement[] = t === 'lrefine' ? [] : [h('label', { class: 'mt-opt' }, swatch, sel)]
-    if (t === 'lbrush' || t === 'lrefine') {
+    const out: HTMLElement[] = [h('label', { class: 'mt-opt' }, swatch, sel)]
+    if (t === 'lbrush') {
       const size = h('input', { type: 'range', min: '4', max: '120', value: String(this.map.brushPx), class: 'mt-opt-range', title: 'Brush size' })
       size.addEventListener('input', () => {
         this.map.brushPx = Number(size.value)
@@ -2309,21 +2302,14 @@ export class MapApp {
       coast.addEventListener('change', () => this.mutate((d) => d.land && (d.land.coast = coast.value === 'ink' ? 'ink' : undefined)))
       const colour = h('select', { class: 'mt-select', title: 'Crisp cell edges, or climates fading softly into each other with gentle shading' }, h('option', { value: '', selected: !grid.blend }, 'Crisp cells'), h('option', { value: 'blend', selected: !!grid.blend }, 'Blended, painterly'))
       colour.addEventListener('change', () => this.mutate((d) => d.land && (d.land.blend = colour.value === 'blend' ? true : undefined)))
-      const detail = h('select', { class: 'mt-select', title: 'How many cells: more means finer painting everywhere' })
+      const detail = h('select', { class: 'mt-select', title: 'How many cells: more means finer painting' })
       const opts = DETAIL.some(([n]) => n === grid.cells) ? DETAIL : ([[grid.cells, 'Current'], ...DETAIL] as [number, string][])
       for (const [n, label] of opts) detail.append(h('option', { value: String(n), selected: n === grid.cells }, `${label} (~${n.toLocaleString()} cells)`))
       detail.addEventListener('change', () => this.mutate((d) => d.land && (d.land = resampleGrid(d.land, { ...d.land.bounds }, Number(detail.value)))))
-      const fine = grid.fine?.length ?? 0
       body.append(
         h('h4', null, 'Look'),
         h('div', { class: 'mt-form' }, h('label', null, 'Colour'), colour, h('label', null, 'Coast'), coast, h('label', null, 'Detail'), detail),
-        h(
-          'div',
-          { class: 'mt-row mt-wrap' },
-          h('span', { class: 'mt-dim' }, `${graph.n.toLocaleString()} cells${fine ? `, finer in ${fine} spot${fine === 1 ? '' : 's'}` : ''}.`),
-          h('button', { class: `mt-btn${this.map.tool === 'lrefine' ? ' mt-on' : ''}`, title: 'Paint where you need smaller cells: islets, straits, thin rivers', onclick: () => this.pickTool('lrefine') }, icon('finegrid'), 'Detail brush'),
-          fine ? h('button', { class: 'mt-btn mt-ghost', title: 'Back to even cells everywhere (painting kept)', onclick: () => this.mutate((d) => d.land && (d.land = refineGrid(d.land, []))) }, 'Remove fine areas') : '',
-        ),
+        h('div', { class: 'mt-dim' }, `${graph.n.toLocaleString()} cells.`),
         h('div', { class: 'mt-row mt-wrap' }, h('label', { class: 'mt-check' }, symbols, 'Biome symbols'), h('label', { class: 'mt-check', title: 'Show the map picture above the terrain, at its own opacity' }, onTop, 'Picture on top')),
       )
     }
@@ -2375,7 +2361,7 @@ export class MapApp {
   private biomePicker(grid: WorldProfile['land'], graph: ReturnType<typeof graphFor> | null, counts: Map<number, number>): HTMLElement {
     const pick = (id: number) => {
       this.landBiome = id
-      if (!isLandTool(this.map.tool) || this.map.tool === 'lpick' || this.map.tool === 'lsample' || this.map.tool === 'lcoast' || this.map.tool === 'lrefine') this.pickTool(this.lastPaintTool)
+      if (!isLandTool(this.map.tool) || this.map.tool === 'lpick' || this.map.tool === 'lsample' || this.map.tool === 'lcoast') this.pickTool(this.lastPaintTool)
       else {
         this.renderSide(true)
         this.renderOptions()
@@ -2967,32 +2953,6 @@ export class MapApp {
       })
       return
     }
-    if (tool === 'lrefine') {
-      const r = Math.round(this.map.brushPx * this.map.unitsPerPx() * 100) / 100
-      if (phase === 'down') this.refineStroke = []
-      const st = this.refineStroke
-      if (!st) return
-      if (phase !== 'end') {
-        const last = st[st.length - 1]
-        if (!last || Math.hypot(last.x - x, last.y - y) > r * 0.45) st.push({ x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100, r })
-        this.map.pendingFine = st
-        this.map.invalidate()
-        return
-      }
-      this.refineStroke = null
-      this.map.pendingFine = null
-      const old = grid.fine ?? []
-      let next: FineArea[]
-      if (e.altKey) next = old.filter((f) => !st.some((q) => Math.hypot(f.x - q.x, f.y - q.y) < q.r))
-      else {
-        // Drop circles that sit wholly inside a bigger one.
-        const all = [...old, ...st]
-        next = all.filter((f, i) => !all.some((o, j) => j !== i && Math.hypot(o.x - f.x, o.y - f.y) + f.r <= o.r && (o.r > f.r || j < i)))
-      }
-      if (grid.cells + fineCellCount(grid, next) > MAX_CELLS * 1.6) return this.warn('That much fine detail would slow the map down: use a smaller brush, or remove some fine areas.')
-      this.mutate((d) => d.land && (d.land = refineGrid(d.land, next)))
-      return
-    }
     if (tool === 'lwand' || tool === 'lcoast') {
       if (phase !== 'down') return
       const meta = p.image
@@ -3416,7 +3376,14 @@ export class MapApp {
         const same = Math.round((grid.cells * area(d)) / area(grid.bounds))
         const first = Math.min(same, MAX_CELLS)
         const opts: [number, string][] = [
-          [first, same > MAX_CELLS ? `Finest allowed (${MAX_CELLS.toLocaleString()} cells)` : `Same cell size (~${same.toLocaleString()} cells)`],
+          [
+            first,
+            (() => {
+              const preset = DETAIL.find(([n]) => n === first)?.[1]
+              if (same > MAX_CELLS) return `${preset ?? 'Finest'} (${MAX_CELLS.toLocaleString()} cells, the most allowed)`
+              return preset ? `${preset}, same cell size (~${first.toLocaleString()} cells)` : `Same cell size (~${same.toLocaleString()} cells)`
+            })(),
+          ],
           ...DETAIL.filter(([n]) => n !== first).map(([n, l]) => [n, `${l} (~${n.toLocaleString()} cells)`] as [number, string]),
         ]
         const pick = this.canvasCells ?? first

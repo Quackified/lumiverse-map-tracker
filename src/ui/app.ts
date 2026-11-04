@@ -1501,6 +1501,27 @@ export class MapApp {
       out.push(h('button', { class: 'mt-btn', onclick: () => ((this.editingPoi = id), this.openPanel('points')) }, 'Edit place'))
     }
     if (n.shapes && !n.places && !n.decor) out.push(h('button', { class: 'mt-btn', onclick: () => this.openPanel('layers') }, 'Shape properties'))
+    if (n.decor) {
+      // Size relative to the stamps as they are now: 25% … 400%, log scale, 100% in the middle.
+      let base: Map<number, DecorStamp> | null = null
+      const r = h('input', { type: 'range', min: '-1', max: '1', step: '0.01', value: '0', class: 'mt-opt-range', title: 'Resize the selected decorations' })
+      const out2 = h('span', { class: 'mt-dim mt-mono' }, '100%')
+      const factor = () => Math.pow(4, Number(r.value))
+      r.addEventListener('input', () => {
+        const p = this.profile
+        if (!p?.decor) return
+        base ??= new Map([...m.selDecor].filter((i) => p.decor![i]).map((i) => [i, p.decor![i]]))
+        out2.textContent = `${Math.round(factor() * 100)}%`
+        m.resizeSelectedDecor(base, factor(), 'move')
+      })
+      r.addEventListener('change', () => {
+        if (base) m.resizeSelectedDecor(base, factor(), 'end')
+        base = null
+        r.value = '0'
+        out2.textContent = '100%'
+      })
+      out.push(h('label', { class: 'mt-opt', title: 'Resize the selected decorations (each release saves; undo with Ctrl+Z)' }, h('span', { class: 'mt-dim' }, 'Size'), r, out2))
+    }
     out.push(
       h('button', { class: 'mt-btn', title: 'Delete (Del)', onclick: () => this.onDeleteSelection({ pois: [...m.selPois], decor: [...m.selDecor], features: [...m.vec.selection] }, true) }, icon('trash'), 'Delete'),
       h('button', { class: 'mt-btn mt-ghost', title: 'Deselect (Esc)', onclick: () => m.setSelected([]) }, 'Deselect'),
@@ -2857,10 +2878,36 @@ export class MapApp {
   }
 
   /** Decorations: the brush list (both sets, with previews), and clearing. */
+  /** Scale all decorations: how big every stamp draws, without changing the stamps. */
+  private decorScaleBox(p: WorldProfile): HTMLElement {
+    const cur = p.decorScale ?? 1
+    const r = h('input', { type: 'range', min: '-1', max: '1', step: '0.01', value: String(Math.log(cur) / Math.log(4)), class: 'mt-grow' })
+    const out = h('span', { class: 'mt-dim mt-mono' }, `${Math.round(cur * 100)}%`)
+    const val = () => {
+      const v = Math.pow(4, Number(r.value))
+      // Snap to 100% near the middle so the original size is easy to get back to.
+      return Math.abs(v - 1) < 0.03 ? 1 : Math.round(v * 100) / 100
+    }
+    r.addEventListener('input', () => {
+      out.textContent = `${Math.round(val() * 100)}%`
+      this.map.previewDecorScale(val())
+    })
+    r.addEventListener('change', () => this.mutate((d) => (val() === 1 ? delete d.decorScale : (d.decorScale = val())), false))
+    return h(
+      'div',
+      { class: 'mt-row', title: 'Draws every decoration bigger or smaller. The stamps are not changed: back at 100% the map looks exactly as before.' },
+      h('span', { class: 'mt-dim' }, 'Scale all'),
+      r,
+      out,
+      cur !== 1 ? h('button', { class: 'mt-btn mt-ghost', onclick: () => this.mutate((d) => delete d.decorScale, false) }, 'Reset') : '',
+    )
+  }
+
   private renderDecorTab(body: HTMLElement): void {
     const p = this.profile!
     body.append(
       h('div', { class: 'mt-dim' }, 'Mountains, forests, hills, dunes and more, scattered with brushes on top of the terrain. Pick a brush, then drag with the Decoration brush (Q); click to place a single stamp. The Eraser (E) removes them.'),
+      this.decorScaleBox(p),
     )
     for (const set of ['Ink', 'Painterly'] as const) {
       const grid = h('div', { class: 'mt-brushes' })

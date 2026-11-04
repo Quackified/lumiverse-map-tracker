@@ -223,6 +223,15 @@ export class MapView {
    * once the view settles, or when the terrain or decorations change.
    */
   private base: { land: HTMLCanvasElement; decor: HTMLCanvasElement; view: View; margin: number; landKey: unknown[]; decorKey: unknown[] } | null = null
+  /** Scale all, while its slider is being dragged (not saved yet). */
+  private scalePreview: number | null = null
+
+  /** Show every decoration at `scale` until the map's own scale changes (the slider was released and saved). */
+  previewDecorScale(scale: number): void {
+    this.scalePreview = scale
+    this.invalidate(false)
+  }
+
   /** Decorations being dragged with the Select tool, drawn live above the cache. */
   private liveStamps: DecorStamp[] | null = null
   /** World areas an eraser stroke changed since the last frame. */
@@ -322,6 +331,7 @@ export class MapView {
 
   setProfile(p: WorldProfile | null): void {
     const changed = p?.id !== this.profile?.id
+    this.scalePreview = null
     this.profile = p
     if (changed) {
       this.hasView = false
@@ -1153,6 +1163,7 @@ export class MapView {
 
   private draw(): void {
     if (!this.w) return
+    this.decor.scale = this.scalePreview ?? this.profile?.decorScale ?? 1
     const g = this.g
     const t = this.readTheme()
     g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
@@ -1247,7 +1258,7 @@ export class MapView {
     }
     const feats = this.vec.featuresAt(sx, sy)
     for (const f of feats) if (f.geom !== 'area') out.push({ kind: 'feature', id: f.id })
-    if (p.decor?.length && this.layers.decor) for (const i of stampsAt(p.decor, this.painter, sx, sy)) out.push({ kind: 'decor', i })
+    if (p.decor?.length && this.layers.decor) for (const i of stampsAt(p.decor, this.painter, sx, sy, p.decorScale ?? 1)) out.push({ kind: 'decor', i })
     for (const f of feats) if (f.geom === 'area') out.push({ kind: 'feature', id: f.id })
     return out
   }
@@ -1352,7 +1363,7 @@ export class MapView {
         if (!this.liveStamps) {
           const picked = new Set(d.decor.map((x) => x.i))
           for (const { st } of d.decor) {
-            const m = st.s * 1.5
+            const m = st.s * this.decor.scale * 1.5
             this.eraseAreas.push({ minX: st.x - m, maxX: st.x + m, minY: st.y - m, maxY: st.y + m })
           }
           this.strokeDecor = (p.decor ?? []).filter((_, i) => !picked.has(i))
@@ -1363,6 +1374,34 @@ export class MapView {
     if (pois.length || features || phase === 'end') this.hooks.onMoveSelection({ pois, features, decor: phase === 'end' ? decor : null }, phase)
     if (phase === 'end') this.endPreview()
     else this.invalidate(false)
+  }
+
+  /**
+   * Resize the selected decorations to `factor` times the sizes in `base`
+   * (index → stamp as they were when resizing began). `end` saves.
+   */
+  resizeSelectedDecor(base: Map<number, DecorStamp>, factor: number, phase: 'move' | 'end'): void {
+    const p = this.profile
+    if (!p?.decor || !base.size) return
+    const list = p.decor.slice()
+    const r = (v: number) => Math.round(v * 1000) / 1000
+    for (const [i, st] of base) if (list[i]) list[i] = { ...st, s: r(Math.max(0.01, st.s * factor)) }
+    if (phase === 'end') {
+      this.hooks.onMoveSelection({ pois: [], features: null, decor: list }, 'end')
+      this.endPreview()
+      return
+    }
+    // Repaint around the stamps at their biggest so far.
+    let area: Bounds | null = null
+    for (const st of base.values()) {
+      const m = st.s * Math.max(1, factor) * this.decor.scale * 1.5 + 1
+      area = area
+        ? { minX: Math.min(area.minX, st.x - m), maxX: Math.max(area.maxX, st.x + m), minY: Math.min(area.minY, st.y - m), maxY: Math.max(area.maxY, st.y + m) }
+        : { minX: st.x - m, maxX: st.x + m, minY: st.y - m, maxY: st.y + m }
+    }
+    if (area) this.eraseAreas.push(area)
+    this.strokeDecor = list
+    this.invalidate(false)
   }
 
   /** Delete, arrow nudges and Escape for the Select tool. */
@@ -1401,7 +1440,7 @@ export class MapView {
     for (const st0 of this.liveStamps ?? [...this.selDecor].map((i) => list?.[i])) {
       const st = st0
       if (!st) continue
-      const b = stampBox(st, this.painter)
+      const b = stampBox(st, this.painter, this.decor.scale)
       g.strokeRect(b.x0 - 2, b.y0 - 2, b.x1 - b.x0 + 4, b.y1 - b.y0 + 4)
     }
     g.restore()
@@ -1521,7 +1560,7 @@ export class MapView {
     this.drawnView = { ...v }
     const size = [this.w, this.hgt, this.dpr]
     const landKey = [land, this.landOpacity, ...size]
-    const decorKey = [decor, this.decorOpacity, ...size]
+    const decorKey = [decor, this.decorOpacity, this.decor.scale, ...size]
     const same = (a: unknown[], b: unknown[]) => a.length === b.length && a.every((k, i) => k === b[i])
     const c = this.base
     const landFresh = !!c && !this.baseDirty && same(c.landKey, landKey)
@@ -1609,7 +1648,7 @@ export class MapView {
     const vh = this.hgt + 2 * b.margin
     // Stamps reach past their centre; repaint neighbours that overlap the area too.
     let reach = 1
-    for (const s of decor ?? []) if (s.s * 1.5 > reach) reach = s.s * 1.5
+    for (const s of decor ?? []) if (s.s * this.decor.scale * 1.5 > reach) reach = s.s * this.decor.scale * 1.5
     let areas = this.eraseAreas
     if (areas.length > 4)
       areas = [areas.reduce((u, a) => ({ minX: Math.min(u.minX, a.minX), maxX: Math.max(u.maxX, a.maxX), minY: Math.min(u.minY, a.minY), maxY: Math.max(u.maxY, a.maxY) }))]

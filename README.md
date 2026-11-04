@@ -194,7 +194,9 @@ Each group in the Places list has a marker button: pick a shape (dot, square, di
 Mountains, forests, hills, dunes, glaciers and volcanoes, scattered with brushes on top of the terrain. Click the **Decorations** layer to see the brushes.
 
 - **Two sets:** the **Ink set** draws flat two-tone shapes with bold outlines (mountains, snowy and volcanic mountains, volcanoes pouring lava veins, dormant volcanoes, lava veins, dry fissures, forest masses, lone trees, hills, cliffs, glacier shards); the **Painterly set** draws soft washes with tapered ink (hills, escarpments, rainforest canopy, woodland, conifers, dunes, sandy and snowy peaks, ice spires, volcanoes, dormant cones, dark peaks, lava fissures).
-- **Decoration brush** (Q): drag to scatter, click to place one stamp (a single volcano, say). **Size**, **Variation** and **Density** are in the options bar. Stamps of the same brush keep their distance, so going over an area again fills gaps rather than piling up.
+- **Decoration brush** (Q): drag to scatter, click to place one stamp (a single volcano, say). **Size** (0.05× to 3×, the largest a stamp gets), **Variation** (how much smaller some come out) and **Density** are in the options bar. Stamps of the same brush keep their distance, so going over an area again fills gaps rather than piling up.
+- **Resize existing stamps:** select them with **Select** (V), box-selecting with Ctrl-drag over a crowded area, and drag **Size** in the options bar (25% to 400%). Each release saves and can be undone.
+- **Scale all** (top of the Decorations properties) draws every stamp bigger or smaller without changing the stamps themselves; back at 100% the map looks exactly as before.
 - **Decoration eraser** (E): drag over stamps to remove them; **Only** limits it to the chosen brush.
 - Forest and canopy brushes draw as one mass with a single scalloped outline; everything else stands on its own and overlaps back to front.
 - Stamps live in world coordinates, so they scale with zoom. The layer row has visibility and opacity; **Clear decorations** removes them all. Every stroke can be undone.

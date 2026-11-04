@@ -223,9 +223,9 @@ function pictureKind(id: string): Kind {
 }
 
 /** A stamp's rough outline on screen: it stands on its point, about as wide as its size. */
-export function stampBox(st: DecorStamp, p: Painter): { x0: number; y0: number; x1: number; y1: number } {
+export function stampBox(st: DecorStamp, p: Painter, scale = 1): { x0: number; y0: number; x1: number; y1: number } {
   const sp = p.toScreen(st.x, st.y)
-  const px = st.s * p.scale()
+  const px = st.s * scale * p.scale()
   const kind = KINDS[st.t]
   if (kind?.mass) return { x0: sp.x - px, y0: sp.y - px, x1: sp.x + px, y1: sp.y + px }
   if (kind?.flat) return { x0: sp.x - px * 0.5, y0: sp.y - px * 0.35, x1: sp.x + px * 0.5, y1: sp.y + px * 0.35 }
@@ -233,10 +233,10 @@ export function stampBox(st: DecorStamp, p: Painter): { x0: number; y0: number; 
 }
 
 /** Indices of the stamps under a screen point, topmost (drawn last) first. */
-export function stampsAt(stamps: DecorStamp[], p: Painter, sx: number, sy: number): number[] {
+export function stampsAt(stamps: DecorStamp[], p: Painter, sx: number, sy: number, scale = 1): number[] {
   const hits: { i: number; y: number; flat: boolean }[] = []
   stamps.forEach((st, i) => {
-    const b = stampBox(st, p)
+    const b = stampBox(st, p, scale)
     // Tiny stamps get a few pixels of slack so they can still be grabbed.
     const pad = Math.max(0, 4 - (b.x1 - b.x0) / 2)
     if (sx >= b.x0 - pad && sx <= b.x1 + pad && sy >= b.y0 - pad && sy <= b.y1 + pad) hits.push({ i, y: st.y, flat: !!KINDS[st.t]?.flat || !!KINDS[st.t]?.mass })
@@ -247,6 +247,9 @@ export function stampsAt(stamps: DecorStamp[], p: Painter, sx: number, sy: numbe
 }
 
 export class DecorRenderer {
+  /** Every stamp drawn this many times its size (the map's Scale all). */
+  scale = 1
+
   draw(g: CanvasRenderingContext2D, stamps: DecorStamp[], p: Painter, viewW: number, viewH: number, opacity = 1): void {
     if (!stamps.length) return
     const k = p.scale()
@@ -261,9 +264,9 @@ export class DecorRenderer {
     for (const st of stamps) {
       const kind = st.t.startsWith('img:') ? pictureKind(st.t.slice(4)) : KINDS[st.t]
       if (!kind) continue
-      const m = st.s * 1.5
+      const m = st.s * this.scale * 1.5
       if (st.x < minX - m || st.x > maxX + m || st.y < minY - m || st.y > maxY + m) continue
-      const px = st.s * k
+      const px = st.s * this.scale * k
       if (px < 2) continue
       const sp = p.toScreen(st.x, st.y)
       if (kind.mass) {

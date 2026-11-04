@@ -306,6 +306,52 @@ await test('a named shape opens its note card', async (page) => {
   assert(card.includes('Too wide to ford.'), `card: ${card}`)
 })
 
+await test('selected decorations resize; Scale all leaves stamps alone', async (page) => {
+  await tool(page, 'v')
+  const before = (await saved(page)).decor!
+  const c1 = await screen(page, -30, 30)
+  const c2 = await screen(page, 30, -30)
+  await page.keyboard.down('Control')
+  await page.mouse.move(c1.x, c1.y)
+  await page.mouse.down()
+  for (let i = 1; i <= 6; i++) await page.mouse.move(c1.x + ((c2.x - c1.x) * i) / 6, c1.y + ((c2.y - c1.y) * i) / 6)
+  await page.mouse.up()
+  await page.keyboard.up('Control')
+  await wait(300)
+  // Drag the options bar's Size slider to 50% (value -0.5 on its log scale) and release.
+  const changed = await page.evaluate(() => {
+    const r = [...document.querySelectorAll<HTMLInputElement>('.mt-optbar input[type=range]')][0]
+    if (!r) return false
+    r.value = '-0.5'
+    r.dispatchEvent(new Event('input'))
+    r.dispatchEvent(new Event('change'))
+    return true
+  })
+  assert(changed, 'no Size slider for selected decorations')
+  const after = (await saved(page)).decor!
+  const shrunk = after.filter((st, i) => st.s < before[i].s - 1e-6).length
+  const same = after.filter((st, i) => st.s === before[i].s).length
+  assert(shrunk > 0 && same > 0, `shrunk ${shrunk}, unchanged ${same}`)
+  const i = after.findIndex((st, k) => st.s < before[k].s - 1e-6)
+  assert(Math.abs(after[i].s - before[i].s * 0.5) < 0.01, `size ${before[i].s} -> ${after[i].s}`)
+  // Scale all: saved on the map, stamps untouched.
+  await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.mt-lrow')].find((e) => e.querySelector('.mt-lrow-name')?.textContent === 'Decorations')?.click())
+  await wait(400)
+  const ok = await page.evaluate(() => {
+    const row = [...document.querySelectorAll<HTMLElement>('.mt-row')].find((e) => e.textContent?.startsWith('Scale all'))
+    const r = row?.querySelector<HTMLInputElement>('input[type=range]')
+    if (!r) return false
+    r.value = '0.5'
+    r.dispatchEvent(new Event('input'))
+    r.dispatchEvent(new Event('change'))
+    return true
+  })
+  assert(ok, 'no Scale all slider')
+  const p = await saved(page)
+  assert(p.decorScale === 2, `decorScale ${p.decorScale}`)
+  assert(JSON.stringify(p.decor) === JSON.stringify(after), 'Scale all changed the stamps')
+})
+
 await test('group marker style is saved', async (page) => {
   await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.mt-chip2')].find((c) => c.textContent?.startsWith('Places'))?.querySelector<HTMLElement>('button:not(.mt-chip2-eye)')?.click())
   await wait(300)

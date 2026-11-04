@@ -183,6 +183,8 @@ export interface WorldProfile {
   /** Landmass, topography, terrain and prop shapes. */
   features?: Feature[]
   layerSettings?: Partial<Record<FeatureLayer, LayerSettings>>
+  /** Draw every decoration this many times its own size (1 when unset); the stamps themselves are unchanged. */
+  decorScale?: number
   /** Marker styles by place group path ("Eastern Continent / Eracia Empire"). */
   groupStyles?: Record<string, GroupStyle>
   image?: MapImageMeta

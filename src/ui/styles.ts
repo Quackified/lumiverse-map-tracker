@@ -153,26 +153,53 @@ export const CSS = `
 .mt-collapsed .mt-panel-head { border-bottom: 0; }
 .mt-collapsed .mt-lrows { display: none; }
 .mt-panel-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--mt-muted); }
-.mt-lrows { overflow-y: auto; padding: 4px 6px 8px; }
-.mt-lrow { display: flex; align-items: center; gap: 4px; min-height: 25px; padding: 1px 4px; border-radius: 6px; }
+.mt-lrows { overflow-y: auto; padding: 6px 8px 8px; }
+.mt-chipgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 4px; margin-bottom: 8px; }
+.mt-chip2 { display: flex; align-items: center; height: 28px; min-width: 0; border: 1px solid var(--mt-border); border-radius: 7px; overflow: hidden; background: var(--mt-fill-subtle); color: var(--mt-muted); }
+.mt-chip2.mt-on { color: var(--mt-text); background: color-mix(in srgb, var(--mt-primary) 14%, transparent); border-color: color-mix(in srgb, var(--mt-primary) 40%, transparent); }
+.mt-chip2.mt-sel { box-shadow: inset 0 0 0 1px var(--mt-primary); }
+.mt-chip2-eye { flex: none; display: grid; place-items: center; width: 26px; height: 100%; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; }
+.mt-chip2-eye .mt-ico { width: 14px; height: 14px; }
+.mt-chip2-label { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 4px; height: 100%; padding: 0 7px 0 0; border: 0; background: none; color: inherit; font: inherit; font-size: 12px; cursor: pointer; text-align: left; }
+.mt-chip2-label > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mt-chip2-count, .mt-lrow-count { flex: none; font-family: var(--mt-mono); font-size: 10.5px; color: var(--mt-muted); }
+.mt-stack { display: grid; gap: 1px; }
+.mt-lrow { display: flex; align-items: center; gap: 4px; height: 28px; padding: 0 4px; border-radius: 6px; }
+.mt-lrow .mt-icon-btn { width: 22px; height: 22px; }
+.mt-lrow .mt-icon-btn .mt-ico { width: 14px; height: 14px; }
 .mt-lrow.mt-pick { cursor: pointer; }
 .mt-lrow.mt-pick:hover { background: var(--mt-fill-subtle); }
-.mt-lrow.mt-on { background: color-mix(in srgb, var(--mt-primary) 18%, transparent); }
+.mt-lrow.mt-on { background: color-mix(in srgb, var(--mt-primary) 16%, transparent); }
 .mt-lrow.mt-off .mt-lrow-name { opacity: .5; }
-.mt-lrow.mt-indent { padding-left: 14px; }
-.mt-lrow-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mt-lrow-opacity { width: 50px; flex: none; }
-.mt-lgroup {
-  display: block; width: 100%; margin-top: 4px; padding: 4px 6px; border: 0; border-radius: 6px; background: none; text-align: left;
-  color: var(--mt-muted); font: inherit; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; cursor: pointer;
-}
-.mt-lgroup:hover, .mt-lgroup.mt-on { color: var(--mt-text); }
+.mt-lrow.mt-indent { padding-left: 18px; }
+.mt-lrow.mt-lhead .mt-lrow-name { font-weight: 600; }
+.mt-lrow-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.mt-lrow-lock { width: 22px; flex: none; }
+.mt-opacity { display: flex; align-items: center; gap: 8px; margin-top: 6px; padding: 6px 4px 0; border-top: 1px solid var(--mt-border); font-size: 11.5px; }
+.mt-opacity .mt-dim { flex: none; }
+input.mt-slim { flex: 1; min-width: 0; height: 14px; margin: 0; appearance: none; -webkit-appearance: none; background: transparent; cursor: pointer; }
+input.mt-slim::-webkit-slider-runnable-track { height: 3px; border-radius: 2px; background: var(--mt-fill); }
+input.mt-slim::-moz-range-track { height: 3px; border-radius: 2px; background: var(--mt-fill); }
+input.mt-slim::-webkit-slider-thumb { -webkit-appearance: none; width: 11px; height: 11px; margin-top: -4px; border-radius: 50%; background: var(--mt-primary); border: 0; }
+input.mt-slim::-moz-range-thumb { width: 11px; height: 11px; border-radius: 50%; background: var(--mt-primary); border: 0; }
 .mt-dialog {
   position: absolute; z-index: 18; top: 30px; bottom: 10px; right: calc(var(--mt-side) + 10px);
   width: min(430px, calc(100% - var(--mt-side) - 70px)); display: flex; flex-direction: column; overflow: hidden;
   background: var(--mt-elev); border: 1px solid var(--mt-border); border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,0.45);
 }
 .mt-dialog[hidden] { display: none; }
+.mt-swatches { display: grid; gap: 6px; padding-bottom: 6px; border-bottom: 1px solid var(--mt-border); margin-bottom: 4px; }
+.mt-swatch-head { display: flex; align-items: center; gap: 8px; padding: 6px; border-radius: 8px; background: var(--mt-fill-subtle); }
+.mt-swatch-big { width: 34px; height: 34px; border-radius: 6px; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.25); flex: none; }
+.mt-swatch-name { display: grid; flex: 1; min-width: 0; line-height: 1.25; }
+.mt-swatch-name b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mt-swatch-name span { font-size: 11px; }
+.mt-swatch-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.mt-swatch-label { width: 68px; flex: none; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--mt-muted); }
+.mt-swatch-tile { padding: 0; width: 30px; height: 30px; border: 0; border-radius: 6px; background: none; cursor: pointer; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.2); overflow: hidden; }
+.mt-swatch-tile img { width: 30px; height: 30px; display: block; }
+.mt-swatch-tile:hover { transform: translateY(-1px); box-shadow: 0 0 0 2px var(--mt-fill), inset 0 0 0 1px rgba(0,0,0,0.2); }
+.mt-swatch-tile.mt-on { box-shadow: 0 0 0 2px var(--mt-primary); }
 .mt-brushes { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 6px; }
 .mt-brush { display: grid; justify-items: center; gap: 2px; padding: 4px 2px 5px; border: 1px solid var(--mt-border); border-radius: 8px; background: var(--mt-fill-subtle); color: inherit; font: inherit; font-size: 11px; line-height: 1.2; cursor: pointer; text-align: center; }
 .mt-brush img { width: 72px; height: 48px; object-fit: contain; }

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import manifest from '../spindle.json'
 import { movePoint, placeRef, placesVarName, placesVarValue, revertPoint } from '../src/shared/places'
 import { applyRefs, findCoords, guessName, resolveRefs } from '../src/shared/convert'
-import { DEFAULT_LAND, LAKE, OCEAN, biomesOf, buildGraph, dropSmallRegions, encodeBytes, findCell, floodCells, graphFor, isWater, newGrid, regionRings, resampleGrid, smoothCells, cellsInRings, EMPTY } from '../src/shared/cells'
+import { DEFAULT_LAND, LAKE, OCEAN, biomesOf, buildGraph, dropSmallRegions, encodeBytes, findCell, floodCells, graphFor, isWater, newGrid, regionRings, resampleGrid, smoothCells, cellsInRings, EMPTY, refineGrid } from '../src/shared/cells'
 import {
   bearing,
   buildContext,
@@ -606,6 +606,29 @@ describe('land grid', () => {
     const st = cropToBounds(crop, b, true)
     expect(imageToWorld(st, crop.x, crop.y)).toEqual({ x: -500, y: 500 })
     expect(imageToWorld(st, crop.x + crop.w, crop.y + crop.h)).toEqual({ x: 500, y: -500 })
+  })
+})
+
+describe('fine cells', () => {
+  it('refines an area to smaller cells, keeping the painting and finding cells inside it', () => {
+    const grid = newGrid({ minX: -100, maxX: 100, minY: -100, maxY: 100 }, 4000, 11)
+    const g0 = graphFor(grid)
+    const v = new Uint8Array(g0.n).fill(OCEAN)
+    for (const c of cellsInRings(g0, [[[-30, -30], [30, -30], [30, 30], [-30, 30]]])) v[c] = DEFAULT_LAND
+    const fine = refineGrid({ ...grid, biome: encodeBytes(v) }, [{ x: 0, y: 0, r: 25 }])
+    const g1 = graphFor(fine)
+    expect(g1.n).toBeGreaterThan(g0.n * 1.3)
+    expect(g1.fine).toBeCloseTo(Math.max(g0.dx, g0.dy) / 3, 5)
+    const b1 = biomesOf(fine, g1)
+    expect(b1[findCell(g1, 0, 0)]).toBe(DEFAULT_LAND)
+    expect(b1[findCell(g1, 70, 70)]).toBe(OCEAN)
+    // Lookups return the true nearest cell, inside and outside the fine area.
+    for (const [x, y] of [[3, -4], [20, 10], [-24.5, 0], [60, -60]]) {
+      const c = findCell(g1, x, y)
+      let best = Infinity
+      for (let i = 0; i < g1.n; i++) best = Math.min(best, (g1.points[2 * i] - x) ** 2 + (g1.points[2 * i + 1] - y) ** 2)
+      expect((g1.points[2 * c] - x) ** 2 + (g1.points[2 * c + 1] - y) ** 2).toBeCloseTo(best, 6)
+    }
   })
 })
 

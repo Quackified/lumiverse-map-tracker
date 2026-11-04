@@ -202,6 +202,7 @@ export const ICONS = {
   stamp: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 19 8.5 9l3 5 2.5-3.5L21 19z" fill="currentColor" fill-opacity="0.2"/><path d="M15.5 5.5l1.2 2.5 2.6.4-1.9 1.8.5 2.6-2.4-1.3-2.4 1.3.5-2.6-1.9-1.8 2.6-.4z" fill="currentColor" stroke-width="1"/></svg>',
   eraser: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="m14 4 6 6-9 9H6l-3-3z"/><path d="m9 9 6 6M11 19h10"/></svg>',
   magnet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 4v7a6 6 0 0 0 12 0V4"/><path d="M6 4h3v7a3 3 0 0 0 6 0V4h3" /><path d="M6 8h3M15 8h3" stroke-width="2.4"/></svg>',
+  finegrid: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="18" height="18" rx="1"/><path d="M12 3v18M3 12h18"/><path d="M15 12v9M18 12v9M12 15h9M12 18h9" stroke-width="1"/></svg>',
   chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
   labels: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V5h11v2M9.5 5v14M7 19h5"/><path d="M14 12h6M17 12v7"/></svg>',
 }

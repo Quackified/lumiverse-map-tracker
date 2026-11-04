@@ -6,6 +6,7 @@ import { mergeInto, newProfile, parseCoordinateText, slug, type ParseResult } fr
 import { VAR_NAME_RE, isMoved, movePoint, placeRef, placeText, placesVarName, revertPoint } from '../shared/places'
 import { applyRefs, findCoords, guessName, resolveRefs, type CoordHit } from '../shared/convert'
 import type {
+  FineArea,
   DecorStamp,
   StampAsset,
   BackendMessage,
@@ -32,6 +33,8 @@ import { DECOR_BRUSHES, StampIndex, brushById, brushDab, brushPreview, convertib
 import { cutOut, sourceFrom, trimmed } from './stampcut'
 import type { DecorTool } from './viewport'
 import { DENSITY_PRESETS, hasSymbols } from './terrain'
+import { BIOME_GROUPS, biomeTile } from './biomeicons'
+import { fineCellCount, refineGrid } from '../shared/cells'
 import { BIOMES, DETAIL, MAX_CELLS, resampleGrid, cellsInRings, regionRings, EMPTY, DEFAULT_CELLS, LAKE, OCEAN, DEFAULT_LAND, biomeColor, biomeName, biomesOf, cellsWithin, encodeBytes, findCell, floodCells, graphFor, isWater, newGrid } from '../shared/cells'
 import { colorAt, detectLandmass, makeSampler, seedFromImage, wandMask, voteCells, type Sampler } from './landmap'
 import { isLandTool, type LandTool } from './viewport'
@@ -74,6 +77,7 @@ const RAIL: { tool: Tool; icon: IconName; label: string; key: string }[][] = [
     { tool: 'llasso', icon: 'lasso', label: 'Biome lasso', key: 'j' },
     { tool: 'lwand', icon: 'wand', label: 'Magic wand (from the picture)', key: 'w' },
     { tool: 'lpick', icon: 'dropper', label: 'Biome eyedropper', key: 'i' },
+    { tool: 'lrefine', icon: 'finegrid', label: 'Detail brush (finer cells)', key: 'k' },
   ],
   [
     { tool: 'dbrush', icon: 'stamp', label: 'Decoration brush', key: 'q' },
@@ -113,6 +117,7 @@ const TOOL_PANEL: Partial<Record<Tool, Panel>> = {
   lsample: 'land',
   lwand: 'land',
   lcoast: 'land',
+  lrefine: 'land',
   dbrush: 'decor',
   derase: 'decor',
   scut: 'decor',
@@ -137,6 +142,7 @@ const TOOL_HINT: Partial<Record<Tool, string>> = {
   lfill: 'Click inside a shape to fill the shape, or anywhere else to fill the connected area. Shift+click always fills the connected area.',
   llasso: 'Drag around an area: everything inside becomes the selected biome.',
   lpick: 'Click the terrain to pick its biome, then carry on painting.',
+  lrefine: 'Paint where cells should be three times finer, for islets, straits and thin rivers. Alt+drag removes fine areas.',
   dbrush: 'Drag to scatter the brush; click to place one. Size, variation and density are in the options bar.',
   derase: 'Drag over decorations to remove them.',
   scut: 'Drag a box around something on the picture (a mountain, a tree, a castle) to make it a stamp.',
@@ -243,6 +249,8 @@ export class MapApp {
   private landSeed = { tolerance: 120, smooth: 1, minRegion: 6 }
   private landStroke: Uint8Array | null = null
   private landFrame = 0
+  /** Fine areas of the detail-brush stroke in progress. */
+  private refineStroke: FineArea[] | null = null
   /** The paint tool to go back to after the eyedropper. */
   private lastPaintTool: LandTool = 'lbrush'
   /** Fill inside the shape under the click, when there is one. */
@@ -1001,7 +1009,11 @@ export class MapApp {
     body.scrollTop = scroll
   }
 
-  /** Every drawn layer, top first: visibility, lock and opacity; a click opens what's behind it. */
+  /**
+   * Layers: the story overlays as toggle chips (the label opens their list),
+   * then the drawn layers as one even stack, top first, with an eye and a lock;
+   * the selected layer's opacity sits underneath.
+   */
   private renderLayersPanel(): void {
     const box = this.layersBox
     box.parentElement?.classList.toggle('mt-collapsed', !this.layersOpen)
@@ -1022,97 +1034,131 @@ export class MapApp {
       }, false, group)
       if (!group) this.renderLayersPanel()
     }
-    const range = (value: number, onInput: (v: number) => void) => {
-      const r = h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(value), class: 'mt-lrow-opacity', title: 'Opacity' })
-      r.addEventListener('input', () => onInput(Number(r.value)))
-      return r
-    }
-    const row = (o: { label: string; visible: boolean; onEye: () => void; on?: boolean; open?: () => void; count?: string | number; extra?: HTMLElement[]; indent?: boolean }) =>
+
+    // Story overlays: chips. The eye toggles; the label opens the list where there is one.
+    const chip = (o: { label: string; ico: IconName; on: boolean; toggle: () => void; open?: () => void; count?: number; selected?: boolean }) =>
       h(
         'div',
-        {
-          class: `mt-lrow${o.on ? ' mt-on' : ''}${o.indent ? ' mt-indent' : ''}${o.visible ? '' : ' mt-off'}${o.open ? ' mt-pick' : ''}`,
-          title: o.open ? 'Click to edit in Properties' : undefined,
-          onclick: (e: Event) => !(e.target as HTMLElement).closest('button, input') && o.open?.(),
-        },
+        { class: `mt-chip2${o.on ? ' mt-on' : ''}${o.selected ? ' mt-sel' : ''}` },
+        h('button', { class: 'mt-chip2-eye', title: o.on ? `Hide ${o.label.toLowerCase()}` : `Show ${o.label.toLowerCase()}`, onclick: o.toggle }, icon(o.on ? o.ico : 'eyeOff')),
+        h(
+          'button',
+          { class: 'mt-chip2-label', title: o.open ? `Edit ${o.label.toLowerCase()} in Properties` : o.on ? 'Hide' : 'Show', onclick: o.open ?? o.toggle },
+          h('span', null, o.label),
+          o.count !== undefined ? h('span', { class: 'mt-chip2-count' }, String(o.count)) : '',
+        ),
+      )
+    box.append(
+      h(
+        'div',
+        { class: 'mt-chipgrid' },
+        chip({ label: 'Places', ico: 'pin', on: L.points, toggle: () => flip('points'), open: () => this.openPanel('points'), count: p.points.length, selected: this.panel === 'points' }),
+        chip({ label: 'Labels', ico: 'labels', on: L.labels, toggle: () => flip('labels') }),
+        chip({ label: 'Trail', ico: 'line', on: L.trail, toggle: () => flip('trail') }),
+        chip({ label: 'Zones', ico: 'zone', on: L.zones, toggle: () => flip('zones'), open: () => this.openPanel('zones'), count: p.zones.filter((z) => z.kind !== 'region').length, selected: this.panel === 'zones' }),
+        chip({ label: 'Regions', ico: 'map', on: L.regions, toggle: () => flip('regions'), open: () => this.openPanel('zones'), count: p.zones.filter((z) => z.kind === 'region').length }),
+      ),
+    )
+
+    // The stack: every row the same height; a lock where the layer has one.
+    const row = (o: { label: string; visible: boolean; onEye: () => void; on: boolean; open: () => void; count?: string | number; lock?: { locked: boolean; toggle: () => void }; indent?: boolean }) =>
+      h(
+        'div',
+        { class: `mt-lrow mt-pick${o.on ? ' mt-on' : ''}${o.indent ? ' mt-indent' : ''}${o.visible ? '' : ' mt-off'}`, onclick: (e: Event) => !(e.target as HTMLElement).closest('button') && o.open() },
         h('button', { class: 'mt-btn mt-icon-btn', title: o.visible ? 'Hide' : 'Show', onclick: o.onEye }, icon(o.visible ? 'eye' : 'eyeOff')),
         h('span', { class: 'mt-lrow-name' }, o.label),
-        o.count !== undefined ? h('span', { class: 'mt-dim mt-mono' }, String(o.count)) : '',
-        ...(o.extra ?? []),
+        o.count !== undefined && o.count !== '' ? h('span', { class: 'mt-lrow-count' }, String(o.count)) : '',
+        o.lock
+          ? h('button', { class: `mt-btn mt-icon-btn mt-lrow-lock${o.lock.locked ? ' mt-on' : ''}`, title: o.lock.locked ? 'Unlock' : 'Lock', onclick: o.lock.toggle }, icon(o.lock.locked ? 'lock' : 'unlock'))
+          : h('span', { class: 'mt-lrow-lock' }),
       )
     const fs = p.features ?? []
     const vecOn = this.panel === 'layers' ? this.map.vec.drawLayer : null
+    const featuresVisible = LAYER_ORDER.some((l) => layerSettings(p.layerSettings, l).visible)
     box.append(
-      row({
-        label: 'Places',
-        visible: L.points,
-        onEye: () => flip('points'),
-        on: this.panel === 'points',
-        open: () => this.openPanel('points'),
-        count: p.points.length,
-        extra: [h('button', { class: `mt-btn mt-icon-btn${L.labels ? ' mt-on' : ''}`, title: L.labels ? 'Hide labels' : 'Show labels', onclick: () => flip('labels') }, icon('labels'))],
-      }),
-      row({ label: 'Trail', visible: L.trail, onEye: () => flip('trail') }),
-      row({ label: 'Zones', visible: L.zones, onEye: () => flip('zones'), on: this.panel === 'zones', open: () => this.openPanel('zones'), count: p.zones.filter((z) => z.kind !== 'region').length }),
-      row({ label: 'Regions', visible: L.regions, onEye: () => flip('regions'), on: this.panel === 'zones', open: () => this.openPanel('zones'), count: p.zones.filter((z) => z.kind === 'region').length }),
-      h('button', { class: `mt-lgroup${this.panel === 'layers' ? ' mt-on' : ''}`, onclick: () => this.openPanel('layers') }, 'Features'),
-      ...LAYER_ORDER.slice()
-        .reverse()
-        .map((layer) => {
-          const st = layerSettings(p.layerSettings, layer)
-          return row({
-            label: LAYER_LABEL[layer],
-            indent: true,
-            visible: st.visible,
-            onEye: () => setVec(layer, { visible: !st.visible }),
-            on: vecOn === layer,
-            open: () => this.selectVecLayer(layer),
-            count: fs.filter((f) => f.layer === layer).length,
-            extra: [
-              h('button', { class: `mt-btn mt-icon-btn${st.locked ? ' mt-on' : ''}`, title: st.locked ? 'Unlock layer' : 'Lock layer', onclick: () => setVec(layer, { locked: !st.locked }) }, icon(st.locked ? 'lock' : 'unlock')),
-              range(st.opacity, (v) => setVec(layer, { opacity: v }, `opacity-${layer}-${stamp}`)),
-            ],
-          })
-        }),
-      row({
-        label: 'Decorations',
-        visible: L.decor,
-        onEye: () => flip('decor'),
-        on: this.panel === 'decor',
-        open: () => this.openPanel('decor'),
-        count: p.decor?.length ?? 0,
-        extra: [
-          range(this.map.decorOpacity, (v) => {
-            this.map.decorOpacity = v
-            this.map.invalidate()
+      h(
+        'div',
+        { class: 'mt-stack' },
+        h(
+          'div',
+          { class: `mt-lrow mt-pick mt-lhead${this.panel === 'layers' ? ' mt-on' : ''}`, onclick: (e: Event) => !(e.target as HTMLElement).closest('button') && this.openPanel('layers') },
+          h(
+            'button',
+            {
+              class: 'mt-btn mt-icon-btn',
+              title: featuresVisible ? 'Hide all features' : 'Show all features',
+              onclick: () =>
+                this.mutate((d) => {
+                  const ls = { ...(d.layerSettings ?? {}) }
+                  for (const l of LAYER_ORDER) ls[l] = { ...layerSettings(d.layerSettings, l), visible: !featuresVisible }
+                  d.layerSettings = ls
+                }, false),
+            },
+            icon(featuresVisible ? 'eye' : 'eyeOff'),
+          ),
+          h('span', { class: 'mt-lrow-name' }, 'Features'),
+          h('span', { class: 'mt-lrow-count' }, String(fs.length)),
+          h('span', { class: 'mt-lrow-lock' }),
+        ),
+        ...LAYER_ORDER.slice()
+          .reverse()
+          .map((layer) => {
+            const st = layerSettings(p.layerSettings, layer)
+            return row({
+              label: LAYER_LABEL[layer],
+              indent: true,
+              visible: st.visible,
+              onEye: () => setVec(layer, { visible: !st.visible }),
+              on: vecOn === layer,
+              open: () => this.selectVecLayer(layer),
+              count: fs.filter((f) => f.layer === layer).length,
+              lock: { locked: st.locked, toggle: () => setVec(layer, { locked: !st.locked }) },
+            })
           }),
-        ],
-      }),
-      row({
-        label: 'Terrain',
-        visible: L.land,
-        onEye: () => flip('land'),
-        on: this.panel === 'land',
-        open: () => this.openPanel('land'),
-        extra: p.land
-          ? [
-              range(this.map.landOpacity, (v) => {
-                this.map.landOpacity = v
-                this.map.invalidate()
-              }),
-            ]
-          : [],
-      }),
-      row({
-        label: 'Picture',
-        visible: L.image,
-        onEye: () => flip('image'),
-        on: this.panel === 'image',
-        open: () => this.openPanel('image'),
-        count: p.image ? undefined : 'none',
-        extra: p.image ? [range(p.image.opacity, (v) => this.mutate((d) => d.image && (d.image.opacity = v), false, `opacity-image-${stamp}`))] : [],
-      }),
+        row({ label: 'Decorations', visible: L.decor, onEye: () => flip('decor'), on: this.panel === 'decor', open: () => this.openPanel('decor'), count: p.decor?.length ?? 0 }),
+        row({ label: 'Terrain', visible: L.land, onEye: () => flip('land'), on: this.panel === 'land', open: () => this.openPanel('land'), count: p.land ? '' : 'none' }),
+        row({ label: 'Picture', visible: L.image, onEye: () => flip('image'), on: this.panel === 'image', open: () => this.openPanel('image'), count: p.image ? '' : 'none' }),
+      ),
     )
+
+    // Opacity of the selected layer, in one slim strip.
+    let label = ''
+    let value = 1
+    let set: ((v: number) => void) | null = null
+    if (this.panel === 'layers') {
+      const layer = this.map.vec.drawLayer
+      label = LAYER_LABEL[layer]
+      value = layerSettings(p.layerSettings, layer).opacity
+      set = (v) => setVec(layer, { opacity: v }, `opacity-${layer}-${stamp}`)
+    } else if (this.panel === 'decor') {
+      label = 'Decorations'
+      value = this.map.decorOpacity
+      set = (v) => {
+        this.map.decorOpacity = v
+        this.map.invalidate()
+      }
+    } else if (this.panel === 'land') {
+      label = 'Terrain'
+      value = this.map.landOpacity
+      set = (v) => {
+        this.map.landOpacity = v
+        this.map.invalidate()
+      }
+    } else if (this.panel === 'image' && p.image) {
+      label = 'Picture'
+      value = p.image.opacity
+      set = (v) => this.mutate((d) => d.image && (d.image.opacity = v), false, `opacity-image-${stamp}`)
+    }
+    if (set) {
+      const out = h('span', { class: 'mt-lrow-count' }, `${Math.round(value * 100)}%`)
+      const r = h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(value), class: 'mt-slim', title: `${label} opacity` })
+      const apply = set
+      r.addEventListener('input', () => {
+        apply(Number(r.value))
+        out.textContent = `${Math.round(Number(r.value) * 100)}%`
+      })
+      box.append(h('div', { class: 'mt-opacity' }, h('span', { class: 'mt-dim' }, `${label} opacity`), r, out))
+    }
   }
 
   /** Choose a shapes layer to draw on and edit. */
@@ -1196,15 +1242,15 @@ export class MapApp {
     const swatch = h('span', { class: 'mt-swatch' })
     swatch.style.background = biomeColor(this.landBiome, grid)
     const sel = h('select', { class: 'mt-select', title: 'Biome to paint (Alt+click on the map picks one)' })
-    for (const b of BIOMES) sel.append(h('option', { value: String(b.id), selected: b.id === this.landBiome }, biomeName(b.id, grid)))
-    sel.append(h('option', { value: String(EMPTY), selected: this.landBiome === EMPTY }, 'Eraser (unpainted)'))
+    for (const [label, ids] of BIOME_GROUPS) sel.append(h('optgroup', { label }, ...ids.map((id) => h('option', { value: String(id), selected: id === this.landBiome }, biomeName(id, grid)))))
+    sel.append(h('optgroup', { label: 'Erase' }, h('option', { value: String(EMPTY), selected: this.landBiome === EMPTY }, 'Eraser (unpainted)')))
     sel.addEventListener('change', () => {
       this.landBiome = Number(sel.value)
       swatch.style.background = biomeColor(this.landBiome, grid)
       if (this.panel === 'land') this.renderSide(true)
     })
-    const out: HTMLElement[] = [h('label', { class: 'mt-opt' }, swatch, sel)]
-    if (t === 'lbrush') {
+    const out: HTMLElement[] = t === 'lrefine' ? [] : [h('label', { class: 'mt-opt' }, swatch, sel)]
+    if (t === 'lbrush' || t === 'lrefine') {
       const size = h('input', { type: 'range', min: '4', max: '120', value: String(this.map.brushPx), class: 'mt-opt-range', title: 'Brush size' })
       size.addEventListener('input', () => {
         this.map.brushPx = Number(size.value)
@@ -2242,70 +2288,45 @@ export class MapApp {
         )
       }
     }
-    body.append(
-      h(
-        'div',
-        { class: 'mt-dim' },
-        'The ground of your world, painted in biomes. Pick one, then use the Brush (B), Fill (G) or Lasso (J); the Eyedropper (I) or Alt+click picks a biome from the map. Unpainted ground is see-through.',
-      ),
-    )
-    const pick = (id: number) => {
-      this.landBiome = id
-      if (!isLandTool(this.map.tool) || this.map.tool === 'lpick' || this.map.tool === 'lsample' || this.map.tool === 'lcoast') this.pickTool(this.lastPaintTool)
-      else {
-        this.renderSide(true)
-        this.renderOptions()
-      }
-    }
+    body.append(this.biomePicker(grid, graph, counts))
 
-    // Palette: pick the biome to paint; the swatch changes its colour.
-    const pal = h('div', { class: 'mt-list' })
-    pal.append(
-      h(
-        'div',
-        { class: `mt-item mt-biome${this.landBiome === EMPTY ? ' mt-on' : ''}` },
-        h('span', { class: 'mt-swatch mt-swatch-empty', title: 'Unpainted' }),
-        h('button', { class: 'mt-item-name', title: 'Paint cells back to unpainted', onclick: () => pick(EMPTY) }, 'Eraser (unpainted)'),
-        h('span', { class: 'mt-dim mt-mono' }, graph && counts.get(EMPTY) ? `${Math.round(((counts.get(EMPTY) ?? 0) / graph.n) * 100)}%` : ''),
-        h('span'),
-      ),
-    )
-    for (const b of BIOMES) {
-      const color = h('input', { class: 'mt-color', type: 'color', value: biomeColor(b.id, grid), title: 'Change colour' })
-      color.addEventListener('change', () =>
+    if (p.image) body.append(this.detectBox(grid))
+
+    if (grid && graph) {
+      // Look: colour, coast and detail (opacity is on the Terrain layer row).
+      const onTop = h('input', { type: 'checkbox', checked: this.map.imageOnTop, disabled: !p.image })
+      onTop.addEventListener('change', () => {
+        this.map.imageOnTop = onTop.checked
+        this.map.invalidate()
+      })
+      const symbols = h('input', { type: 'checkbox', checked: grid.symbols === true })
+      symbols.addEventListener('change', () =>
         this.mutate((d) => {
-          d.land ??= newGrid({ ...d.bounds }, DEFAULT_CELLS)
-          d.land.colors = { ...d.land.colors, [b.id]: color.value }
+          d.land!.symbols = symbols.checked ? true : undefined
         }),
       )
-      const n = counts.get(b.id) ?? 0
-      pal.append(
+      const coast = h('select', { class: 'mt-select', title: 'How the shoreline is drawn' }, h('option', { value: 'soft', selected: grid.coast !== 'ink' }, 'Soft glow'), h('option', { value: 'ink', selected: grid.coast === 'ink' }, 'Inked, with water hatching'))
+      coast.addEventListener('change', () => this.mutate((d) => d.land && (d.land.coast = coast.value === 'ink' ? 'ink' : undefined)))
+      const colour = h('select', { class: 'mt-select', title: 'Crisp cell edges, or climates fading softly into each other with gentle shading' }, h('option', { value: '', selected: !grid.blend }, 'Crisp cells'), h('option', { value: 'blend', selected: !!grid.blend }, 'Blended, painterly'))
+      colour.addEventListener('change', () => this.mutate((d) => d.land && (d.land.blend = colour.value === 'blend' ? true : undefined)))
+      const detail = h('select', { class: 'mt-select', title: 'How many cells: more means finer painting everywhere' })
+      const opts = DETAIL.some(([n]) => n === grid.cells) ? DETAIL : ([[grid.cells, 'Current'], ...DETAIL] as [number, string][])
+      for (const [n, label] of opts) detail.append(h('option', { value: String(n), selected: n === grid.cells }, `${label} (~${n.toLocaleString()} cells)`))
+      detail.addEventListener('change', () => this.mutate((d) => d.land && (d.land = resampleGrid(d.land, { ...d.land.bounds }, Number(detail.value)))))
+      const fine = grid.fine?.length ?? 0
+      body.append(
+        h('h4', null, 'Look'),
+        h('div', { class: 'mt-form' }, h('label', null, 'Colour'), colour, h('label', null, 'Coast'), coast, h('label', null, 'Detail'), detail),
         h(
           'div',
-          { class: `mt-item mt-biome${b.id === this.landBiome ? ' mt-on' : ''}` },
-          color,
-          h('button', { class: 'mt-item-name', onclick: () => pick(b.id) }, biomeName(b.id, grid)),
-          h('span', { class: 'mt-dim mt-mono' }, graph && n ? `${Math.round((n / graph.n) * 100)}%` : ''),
-          grid?.colors?.[b.id]
-            ? h(
-                'button',
-                {
-                  class: 'mt-btn mt-icon-btn',
-                  title: 'Default colour',
-                  onclick: () =>
-                    this.mutate((d) => {
-                      const c = { ...d.land!.colors }
-                      delete c[b.id]
-                      d.land!.colors = c
-                    }),
-                },
-                '\u21ba',
-              )
-            : h('span'),
+          { class: 'mt-row mt-wrap' },
+          h('span', { class: 'mt-dim' }, `${graph.n.toLocaleString()} cells${fine ? `, finer in ${fine} spot${fine === 1 ? '' : 's'}` : ''}.`),
+          h('button', { class: `mt-btn${this.map.tool === 'lrefine' ? ' mt-on' : ''}`, title: 'Paint where you need smaller cells: islets, straits, thin rivers', onclick: () => this.pickTool('lrefine') }, icon('finegrid'), 'Detail brush'),
+          fine ? h('button', { class: 'mt-btn mt-ghost', title: 'Back to even cells everywhere (painting kept)', onclick: () => this.mutate((d) => d.land && (d.land = refineGrid(d.land, []))) }, 'Remove fine areas') : '',
         ),
+        h('div', { class: 'mt-row mt-wrap' }, h('label', { class: 'mt-check' }, symbols, 'Biome symbols'), h('label', { class: 'mt-check', title: 'Show the map picture above the terrain, at its own opacity' }, onTop, 'Picture on top')),
       )
     }
-    body.append(h('h4', null, 'Biomes'), pal)
 
     // Old shapes painted as terrain.
     const convertible = (p.features ?? []).filter((f) => this.convertibleShape(f))
@@ -2317,43 +2338,12 @@ export class MapApp {
       )
     }
 
-    if (p.image) body.append(this.detectBox(grid))
-
     if (!grid || !graph) return
-
-    // Display (opacity is on the Terrain layer row).
-    const onTop = h('input', { type: 'checkbox', checked: this.map.imageOnTop, disabled: !p.image })
-    onTop.addEventListener('change', () => {
-      this.map.imageOnTop = onTop.checked
-      this.map.invalidate()
-    })
-    const symbols = h('input', { type: 'checkbox', checked: grid.symbols === true })
-    symbols.addEventListener('change', () =>
-      this.mutate((d) => {
-        d.land!.symbols = symbols.checked ? true : undefined
-      }),
-    )
-    const coast = h('select', { class: 'mt-select', title: 'How the shoreline is drawn' }, h('option', { value: 'soft', selected: grid.coast !== 'ink' }, 'Soft glow'), h('option', { value: 'ink', selected: grid.coast === 'ink' }, 'Inked, with water hatching'))
-    coast.addEventListener('change', () => this.mutate((d) => d.land && (d.land.coast = coast.value === 'ink' ? 'ink' : undefined)))
-    const colour = h('select', { class: 'mt-select', title: 'Crisp cell edges, or climates fading softly into each other with gentle shading' }, h('option', { value: '', selected: !grid.blend }, 'Crisp cells'), h('option', { value: 'blend', selected: !!grid.blend }, 'Blended, painterly'))
-    colour.addEventListener('change', () => this.mutate((d) => d.land && (d.land.blend = colour.value === 'blend' ? true : undefined)))
-    const detail = h('select', { class: 'mt-select', title: 'How many cells: more means finer painting' })
-    const opts = DETAIL.some(([n]) => n === grid.cells) ? DETAIL : ([[grid.cells, 'Current'], ...DETAIL] as [number, string][])
-    for (const [n, label] of opts) detail.append(h('option', { value: String(n), selected: n === grid.cells }, `${label} (~${n.toLocaleString()} cells)`))
-    detail.addEventListener('change', () => this.mutate((d) => d.land && (d.land = resampleGrid(d.land, { ...d.land.bounds }, Number(detail.value)))))
-    body.append(
-      h('h4', null, 'Display'),
-      h('div', { class: 'mt-row mt-wrap' }, h('label', { class: 'mt-check' }, symbols, 'Terrain symbols'), h('label', { class: 'mt-check', title: 'Show the map picture above the terrain, at its own opacity' }, onTop, 'Picture on top')),
-      h('div', { class: 'mt-form' }, h('label', null, 'Colour'), colour, h('label', null, 'Coast'), coast, h('label', null, 'Detail'), detail),
-    )
-
     body.append(this.landSeedBox(grid))
-
     body.append(
       h(
         'div',
         { class: 'mt-row' },
-        h('span', { class: 'mt-dim' }, `${graph.n.toLocaleString()} cells`),
         h('span', { class: 'mt-spacer' }),
         h(
           'button',
@@ -2375,6 +2365,68 @@ export class MapApp {
           this.confirmRemoveLand ? 'Confirm clear' : 'Clear terrain',
         ),
       ),
+    )
+  }
+
+  /**
+   * The biome picker, like an editor's swatches: the current biome on top with
+   * its colour, then every biome as a tile grouped by climate.
+   */
+  private biomePicker(grid: WorldProfile['land'], graph: ReturnType<typeof graphFor> | null, counts: Map<number, number>): HTMLElement {
+    const pick = (id: number) => {
+      this.landBiome = id
+      if (!isLandTool(this.map.tool) || this.map.tool === 'lpick' || this.map.tool === 'lsample' || this.map.tool === 'lcoast' || this.map.tool === 'lrefine') this.pickTool(this.lastPaintTool)
+      else {
+        this.renderSide(true)
+        this.renderOptions()
+      }
+    }
+    const cur = this.landBiome
+    const share = (id: number) => (graph && counts.get(id) ? `${Math.round(((counts.get(id) ?? 0) / graph.n) * 100)}% of the map` : 'not used yet')
+    const tile = (id: number) =>
+      h(
+        'button',
+        { class: `mt-swatch-tile${id === cur ? ' mt-on' : ''}`, title: `${id === EMPTY ? 'Eraser (unpainted)' : biomeName(id, grid)} \u00b7 ${share(id)}`, onclick: () => pick(id) },
+        h('img', { src: biomeTile(id, biomeColor(id, grid)), alt: '' }),
+      )
+    const color = h('input', { class: 'mt-color', type: 'color', value: cur === EMPTY ? '#cccccc' : biomeColor(cur, grid), title: 'Change this biome\u2019s colour', disabled: cur === EMPTY })
+    color.addEventListener('change', () =>
+      this.mutate((d) => {
+        d.land ??= newGrid({ ...d.bounds }, DEFAULT_CELLS)
+        d.land.colors = { ...d.land.colors, [cur]: color.value }
+      }),
+    )
+    const head = h(
+      'div',
+      { class: 'mt-swatch-head' },
+      h('img', { src: biomeTile(cur, biomeColor(cur, grid)), alt: '', class: 'mt-swatch-big' }),
+      h('div', { class: 'mt-swatch-name' }, h('b', null, cur === EMPTY ? 'Eraser' : biomeName(cur, grid)), h('span', { class: 'mt-dim' }, share(cur))),
+      color,
+      grid?.colors?.[cur]
+        ? h(
+            'button',
+            {
+              class: 'mt-btn mt-icon-btn',
+              title: 'Default colour',
+              onclick: () =>
+                this.mutate((d) => {
+                  const c = { ...d.land!.colors }
+                  delete c[cur]
+                  d.land!.colors = c
+                }),
+            },
+            '\u21ba',
+          )
+        : '',
+    )
+    const rows = BIOME_GROUPS.map(([label, ids]) => h('div', { class: 'mt-swatch-row' }, h('span', { class: 'mt-swatch-label' }, label), ...ids.map(tile)))
+    rows.push(h('div', { class: 'mt-swatch-row' }, h('span', { class: 'mt-swatch-label' }, 'Erase'), tile(EMPTY)))
+    return h(
+      'div',
+      { class: 'mt-swatches' },
+      head,
+      ...rows,
+      h('div', { class: 'mt-dim' }, 'Paint with the Brush (B), Fill (G), Lasso (J) or Wand (W); the Eyedropper (I) or Alt+click picks a biome from the map. Unpainted ground is see-through.'),
     )
   }
 
@@ -2913,6 +2965,32 @@ export class MapApp {
       this.mutate((d) => {
         d.land!.samples = [...(d.land!.samples ?? []), { biome: this.landBiome, rgb }]
       })
+      return
+    }
+    if (tool === 'lrefine') {
+      const r = Math.round(this.map.brushPx * this.map.unitsPerPx() * 100) / 100
+      if (phase === 'down') this.refineStroke = []
+      const st = this.refineStroke
+      if (!st) return
+      if (phase !== 'end') {
+        const last = st[st.length - 1]
+        if (!last || Math.hypot(last.x - x, last.y - y) > r * 0.45) st.push({ x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100, r })
+        this.map.pendingFine = st
+        this.map.invalidate()
+        return
+      }
+      this.refineStroke = null
+      this.map.pendingFine = null
+      const old = grid.fine ?? []
+      let next: FineArea[]
+      if (e.altKey) next = old.filter((f) => !st.some((q) => Math.hypot(f.x - q.x, f.y - q.y) < q.r))
+      else {
+        // Drop circles that sit wholly inside a bigger one.
+        const all = [...old, ...st]
+        next = all.filter((f, i) => !all.some((o, j) => j !== i && Math.hypot(o.x - f.x, o.y - f.y) + f.r <= o.r && (o.r > f.r || j < i)))
+      }
+      if (grid.cells + fineCellCount(grid, next) > MAX_CELLS * 1.6) return this.warn('That much fine detail would slow the map down: use a smaller brush, or remove some fine areas.')
+      this.mutate((d) => d.land && (d.land = refineGrid(d.land, next)))
       return
     }
     if (tool === 'lwand' || tool === 'lcoast') {

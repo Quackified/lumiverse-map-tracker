@@ -18,8 +18,11 @@ import { VectorEditor, isVectorTool, type VectorTool } from './vector'
 import { LandRenderer } from './landmap'
 import { biomeName } from '../shared/cells'
 
-export type LandTool = 'lbrush' | 'lfill' | 'llasso' | 'lpick' | 'lsample'
-export const isLandTool = (t: string): t is LandTool => t === 'lbrush' || t === 'lfill' || t === 'llasso' || t === 'lpick' || t === 'lsample'
+export type LandTool = 'lbrush' | 'lfill' | 'llasso' | 'lpick' | 'lsample' | 'lwand' | 'lcoast'
+const LAND_TOOLS = new Set<string>(['lbrush', 'lfill', 'llasso', 'lpick', 'lsample', 'lwand', 'lcoast'])
+export const isLandTool = (t: string): t is LandTool => LAND_TOOLS.has(t)
+/** Tools that read the picture: it comes to the front while they're active. */
+const PICTURE_TOOLS = new Set<string>(['lsample', 'lwand', 'lcoast'])
 export type Tool = 'pan' | 'me' | 'dest' | 'add' | 'measure' | 'crop' | 'zone' | 'imgxf' | 'pmove' | VectorTool | LandTool
 type CropMode = 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
 
@@ -921,7 +924,7 @@ export class MapView {
       // The picture sits under the vector layers, except while it's being cropped
       // or transformed, when it comes to the front so it can be lined up.
       // Picking colour samples needs the picture in view, so it comes to the front then.
-      const picOnTop = this.imageOnTop || this.tool === 'lsample'
+      const picOnTop = this.imageOnTop || PICTURE_TOOLS.has(this.tool)
       if (this.imageVisible() && !editingImage && !picOnTop) this.drawImage(false)
       if (p.land && this.layers.land) this.land.draw(this.g, p.land, this.painter, this.w, this.hgt, this.landOpacity)
       if (this.imageVisible() && !editingImage && picOnTop) this.drawImage(false)
@@ -983,7 +986,8 @@ export class MapView {
     const r = this.screenRect(c.x, c.y, c.w, c.h)
     const g = this.g
     g.save()
-    g.globalAlpha = this.editingImage() || this.tool === 'lsample' ? Math.max(meta.opacity, 0.85) : meta.opacity
+    // Sampling needs the picture clear; the wand and landmass tools show the terrain through it.
+    g.globalAlpha = this.editingImage() || this.tool === 'lsample' ? Math.max(meta.opacity, 0.85) : PICTURE_TOOLS.has(this.tool) ? Math.min(Math.max(meta.opacity, 0.5), 0.6) : meta.opacity
     g.imageSmoothingEnabled = true
     g.imageSmoothingQuality = 'high'
     g.drawImage(img, c.x, c.y, c.w, c.h, r.x, r.y, r.w, r.h)

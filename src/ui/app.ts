@@ -1,6 +1,6 @@
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types'
 import { bearing, boundsOf, calibMaps, calibrationForBounds, compass, distanceUnits, formatCoord, formatKm, imageToWorld, locate, normalizeCalib, rectCalibration } from '../shared/geo'
-import { FEATURE_TYPES, LAYER_LABEL, LAYER_ORDER, featuresFromJson, featuresToGeoJson, layerSettings, newFeatureId, pointInRings } from '../shared/features'
+import { FEATURE_TYPES, LAYER_LABEL, LAYER_ORDER, featuresFromJson, featuresToGeoJson, layerSettings, newFeatureId, pointInRings, simplify } from '../shared/features'
 import { entriesFromLorebookJson, hasMapData, parseMapEntries } from '../shared/mapext'
 import { mergeInto, newProfile, parseCoordinateText, slug, type ParseResult } from '../shared/parser'
 import { VAR_NAME_RE, isMoved, movePoint, placeRef, placeText, placesVarName, revertPoint } from '../shared/places'
@@ -27,8 +27,8 @@ import { History } from './history'
 import { MapView, type Layers, type Tool } from './viewport'
 import { isVectorTool } from './vector'
 import { DENSITY_PRESETS, hasSymbols } from './terrain'
-import { BIOMES, DETAIL, MAX_CELLS, resampleGrid, cellsInRings, EMPTY, DEFAULT_CELLS, LAKE, OCEAN, DEFAULT_LAND, biomeColor, biomeName, biomesOf, cellsWithin, encodeBytes, findCell, floodCells, graphFor, isWater, newGrid } from '../shared/cells'
-import { colorAt, makeSampler, seedFromImage, type Sampler } from './landmap'
+import { BIOMES, DETAIL, MAX_CELLS, resampleGrid, cellsInRings, regionRings, EMPTY, DEFAULT_CELLS, LAKE, OCEAN, DEFAULT_LAND, biomeColor, biomeName, biomesOf, cellsWithin, encodeBytes, findCell, floodCells, graphFor, isWater, newGrid } from '../shared/cells'
+import { colorAt, detectLandmass, makeSampler, seedFromImage, wandMask, voteCells, type Sampler } from './landmap'
 import { isLandTool, type LandTool } from './viewport'
 import { worldToImage } from '../shared/geo'
 
@@ -67,9 +67,13 @@ const RAIL: { tool: Tool; icon: IconName; label: string; key: string }[][] = [
     { tool: 'lbrush', icon: 'brush', label: 'Biome brush', key: 'b' },
     { tool: 'lfill', icon: 'bucket', label: 'Biome fill', key: 'g' },
     { tool: 'llasso', icon: 'lasso', label: 'Biome lasso', key: 'j' },
+    { tool: 'lwand', icon: 'wand', label: 'Magic wand (from the picture)', key: 'w' },
     { tool: 'lpick', icon: 'dropper', label: 'Biome eyedropper', key: 'i' },
   ],
 ]
+
+/** Marks coastline outlines saved from the terrain, so saving again replaces them (unlabelled on the map). */
+const DETECTED_COAST = 'Detected coastline (from Terrain)'
 
 /** Terrain shape types and the biome each paints as. */
 const SHAPE_BIOME: Record<string, number> = {
@@ -80,7 +84,7 @@ const SHAPE_BIOME: Record<string, number> = {
   desert: 1,
   snow: 11,
   swamp: 12,
-  volcanic: 14,
+  volcanic: 16,
   hills: 15,
 }
 
@@ -98,6 +102,8 @@ const TOOL_PANEL: Partial<Record<Tool, Panel>> = {
   llasso: 'land',
   lpick: 'land',
   lsample: 'land',
+  lwand: 'land',
+  lcoast: 'land',
   crop: 'image',
   imgxf: 'image',
 }
@@ -119,6 +125,8 @@ const TOOL_HINT: Partial<Record<Tool, string>> = {
   lfill: 'Click inside a shape to fill the shape, or anywhere else to fill the connected area. Shift+click always fills the connected area.',
   llasso: 'Drag around an area: everything inside becomes the selected biome.',
   lpick: 'Click the terrain to pick its biome, then carry on painting.',
+  lwand: 'Click a patch of the picture: every connected spot of a similar colour becomes the selected biome. Alt+click erases it back to unpainted.',
+  lcoast: 'Click the sea on the picture: water connected to it becomes ocean, enclosed water becomes lakes, everything else land.',
   lsample: 'Seeding: click the picture where it shows the selected biome to add a colour sample, then Generate.',
   pmove: 'Drag places to move them (Shift 10, Alt 0.1); arrows nudge. Rings mark lorebook positions.',
 }
@@ -202,6 +210,7 @@ export class MapApp {
   private editingZone: string | null = null
   private history = new History()
   private undoBtn!: HTMLButtonElement
+  private gridBtn!: HTMLButtonElement
   private redoBtn!: HTMLButtonElement
   /** Groups a run of edits (a drag, a scrub) into one undo step. */
   private editGroup: string | null = null
@@ -221,6 +230,10 @@ export class MapApp {
   private lastPaintTool: LandTool = 'lbrush'
   /** Fill inside the shape under the click, when there is one. */
   private landFillShapes = true
+  /** Magic wand and landmass detection: colour tolerance, and what land becomes. */
+  private wandTol = 45
+  private coastTol = 60
+  private coastLand = DEFAULT_LAND
   private confirmRemoveLand = false
   private picture: HTMLImageElement | null = null
   private sampler: Sampler | null = null
@@ -576,6 +589,20 @@ export class MapApp {
         h('button', { class: 'mt-btn', title: 'Fit (0)', onclick: () => this.map.fit() }, icon('fit')),
         h('button', { class: 'mt-btn', title: 'Zoom in (+)', onclick: () => this.map.zoomBy(1.25) }, icon('plus')),
       ),
+      (this.gridBtn = h(
+        'button',
+        {
+          class: `mt-btn${this.map.layers.grid ? ' mt-on' : ''}`,
+          title: 'Coordinate grid',
+          onclick: () => {
+            this.map.layers = { ...this.map.layers, grid: !this.map.layers.grid }
+            this.gridBtn.classList.toggle('mt-on', this.map.layers.grid)
+            this.map.invalidate()
+            this.savePrefs()
+          },
+        },
+        icon('grid'),
+      )),
       h('button', { class: 'mt-btn', title: 'Center on me', onclick: () => this.centerOnMe() }, icon('me')),
       h('button', { class: 'mt-btn mt-side-btn', title: 'Show or hide the Layers and Properties panels', onclick: () => this.toggleSide() }, icon('side')),
     )
@@ -597,7 +624,7 @@ export class MapApp {
   /** A tool chosen on the rail or by its key. Land tools need a grid, the sampler a picture. */
   private pickTool(t: Tool): void {
     if (t !== 'pan' && t !== 'measure' && !this.profile) return this.warn('Pick or create a map first.')
-    if (t === 'lsample' && !this.profile?.image) return this.warn('Upload a map picture first (Picture layer).')
+    if ((t === 'lsample' || t === 'lwand' || t === 'lcoast') && !this.profile?.image) return this.warn('Upload a map picture first (Picture layer).')
     if (isLandTool(t)) this.ensureLand()
     this.setTool(t)
   }
@@ -608,7 +635,7 @@ export class MapApp {
   }
 
   private setTool(t: Tool): void {
-    if (t === 'lbrush' || t === 'lfill' || t === 'llasso') this.lastPaintTool = t
+    if (t === 'lbrush' || t === 'lfill' || t === 'llasso' || t === 'lwand') this.lastPaintTool = t
     this.map.setTool(t)
     for (const [tool, b] of this.toolButtons) b.classList.toggle('mt-on', tool === t)
     this.hint.hidden = true
@@ -998,7 +1025,6 @@ export class MapApp {
         count: p.image ? undefined : 'none',
         extra: p.image ? [range(p.image.opacity, (v) => this.mutate((d) => d.image && (d.image.opacity = v), false, `opacity-image-${stamp}`))] : [],
       }),
-      row({ label: 'Grid', visible: L.grid, onEye: () => flip('grid') }),
     )
   }
 
@@ -1062,6 +1088,23 @@ export class MapApp {
       })
       out.push(h('label', { class: 'mt-opt' }, h('span', { class: 'mt-dim' }, 'Size'), size))
     }
+    const tolerance = (value: number, set: (v: number) => void) => {
+      const r = h('input', { type: 'range', min: '5', max: '200', value: String(value), class: 'mt-opt-range', title: 'How different a colour may be and still count' })
+      const out = h('span', { class: 'mt-dim mt-mono' }, String(value))
+      r.addEventListener('input', () => {
+        set(Number(r.value))
+        out.textContent = r.value
+      })
+      return h('label', { class: 'mt-opt' }, h('span', { class: 'mt-dim' }, 'Tolerance'), r, out)
+    }
+    if (t === 'lcoast') {
+      const landSel = h('select', { class: 'mt-select', title: 'What the land becomes' })
+      landSel.append(h('option', { value: String(EMPTY), selected: this.coastLand === EMPTY }, 'Unpainted'))
+      for (const b of BIOMES) if (!isWater(b.id)) landSel.append(h('option', { value: String(b.id), selected: b.id === this.coastLand }, biomeName(b.id, grid)))
+      landSel.addEventListener('change', () => (this.coastLand = Number(landSel.value)))
+      return [h('label', { class: 'mt-opt' }, h('span', { class: 'mt-dim' }, 'Land as'), landSel), tolerance(this.coastTol, (v) => (this.coastTol = v))]
+    }
+    if (t === 'lwand') out.push(tolerance(this.wandTol, (v) => (this.wandTol = v)))
     if (t === 'lpick') return [h('span', { class: 'mt-dim' }, `Picking for the ${this.lastPaintTool === 'lfill' ? 'fill' : this.lastPaintTool === 'llasso' ? 'lasso' : 'brush'}`)]
     if (t === 'lfill') {
       const shapes = h('input', { type: 'checkbox', checked: this.landFillShapes })
@@ -2060,7 +2103,7 @@ export class MapApp {
     )
     const pick = (id: number) => {
       this.landBiome = id
-      if (!isLandTool(this.map.tool) || this.map.tool === 'lpick' || this.map.tool === 'lsample') this.pickTool(this.lastPaintTool)
+      if (!isLandTool(this.map.tool) || this.map.tool === 'lpick' || this.map.tool === 'lsample' || this.map.tool === 'lcoast') this.pickTool(this.lastPaintTool)
       else {
         this.renderSide(true)
         this.renderOptions()
@@ -2126,6 +2169,8 @@ export class MapApp {
       )
     }
 
+    if (p.image) body.append(this.detectBox(grid))
+
     if (!grid || !graph) return
 
     // Display (opacity is on the Terrain layer row).
@@ -2181,6 +2226,52 @@ export class MapApp {
     )
   }
 
+  /** Detect from the picture: landmass from one click, the magic wand, outline export. */
+  private detectBox(grid: WorldProfile['land']): HTMLElement {
+    let land = 0
+    if (grid) {
+      const biomes = biomesOf(grid, graphFor(grid))
+      for (let i = 0; i < biomes.length; i++) if (biomes[i] !== EMPTY && !isWater(biomes[i])) land++
+    }
+    return h(
+      'div',
+      null,
+      h('h4', null, 'Detect from the picture'),
+      h(
+        'div',
+        { class: 'mt-row mt-wrap' },
+        h('button', { class: `mt-btn${this.map.tool === 'lcoast' ? ' mt-on' : ''}`, title: 'Then click the sea on the picture', onclick: () => this.pickTool('lcoast') }, 'Find landmass'),
+        h('button', { class: `mt-btn${this.map.tool === 'lwand' ? ' mt-on' : ''}`, onclick: () => this.pickTool('lwand') }, icon('wand'), 'Magic wand'),
+        h('button', { class: 'mt-btn', disabled: !land, title: 'The coastline as an editable outline line in Features', onclick: () => this.saveCoastline() }, 'Save coastline as outline'),
+      ),
+      h('div', { class: 'mt-dim' }, 'Find landmass: click the sea once and the coastline is traced for you. Magic wand (W): click one patch (a forest, a desert) to paint just that. Crop the picture to the map first so its frame isn\u2019t read as land.'),
+    )
+  }
+
+  /** The painted coastline as Outlines lines (replacing an earlier detected one). */
+  private saveCoastline(): void {
+    const grid = this.profile?.land
+    if (!grid) return
+    const graph = graphFor(grid)
+    const biomes = biomesOf(grid, graph)
+    const rings = regionRings(graph, (c) => (biomes[c] !== EMPTY && !isWater(biomes[c]) ? 1 : null)).get(1) ?? []
+    const tol = Math.max(graph.dx, graph.dy) * 0.6
+    const lines: Feature[] = []
+    for (const r of rings) {
+      const pts: [number, number][] = []
+      for (let i = 0; i < r.length; i += 2) pts.push([Math.round(r[i] * 100) / 100, Math.round(r[i + 1] * 100) / 100])
+      if (pts.length < 4) continue
+      pts.push(pts[0])
+      const simple = simplify(pts, tol)
+      if (simple.length >= 4) lines.push({ id: newFeatureId('landmass'), layer: 'landmass', geom: 'line', type: 'coast', note: DETECTED_COAST, rings: [simple], smooth: true })
+    }
+    if (!lines.length) return this.warn('No coastline to save yet.')
+    this.mutate((d) => {
+      d.features = [...(d.features ?? []).filter((f) => !(f.layer === 'landmass' && f.note === DETECTED_COAST)), ...lines]
+    })
+    this.warn(`Saved ${lines.length} coastline outline${lines.length === 1 ? '' : 's'} in Features > Outlines.`)
+  }
+
   /** A shape that "Paint shapes as terrain" understands. */
   private convertibleShape(f: Feature): boolean {
     if (f.geom !== 'area' || f.hidden) return false
@@ -2233,7 +2324,7 @@ export class MapApp {
   private landSeedBox(grid: NonNullable<WorldProfile['land']>): HTMLElement {
     const p = this.profile!
     const samples = grid.samples ?? []
-    const box = h('details', { class: 'mt-group', open: !!p.image && samples.length < 2 }, h('summary', null, h('span', null, 'Seed from the map picture'), h('span', { class: 'mt-dim' }, samples.length ? ` · ${samples.length} samples` : '')))
+    const box = h('details', { class: 'mt-group', open: !!p.image && samples.length < 2 }, h('summary', null, h('span', null, 'Colour samples (advanced)'), h('span', { class: 'mt-dim' }, samples.length ? ` · ${samples.length} samples` : '')))
     if (!p.image) {
       box.append(h('div', { class: 'mt-dim' }, 'Upload a map picture in the Image tab first.'))
       return box
@@ -2344,6 +2435,38 @@ export class MapApp {
       const rgb = col.map((v) => Math.round(v)) as [number, number, number]
       this.mutate((d) => {
         d.land!.samples = [...(d.land!.samples ?? []), { biome: this.landBiome, rgb }]
+      })
+      return
+    }
+    if (tool === 'lwand' || tool === 'lcoast') {
+      if (phase !== 'down') return
+      const meta = p.image
+      const sampler = this.ensureSampler()
+      if (!meta || !sampler) return this.warn('Upload a map picture first.')
+      const at = worldToImage(meta.calib, x, y)
+      if (tool === 'lcoast') {
+        const next = detectLandmass(grid, meta, sampler, at.px, at.py, this.coastTol, this.coastLand)
+        if (!next) return this.warn('Click on the picture, on the sea.')
+        this.mutate((d) => {
+          d.land!.biome = encodeBytes(next)
+        })
+        this.setTool(this.lastPaintTool)
+        return this.warn('Landmass found. Paint it, or save the coastline as an outline in Terrain.')
+      }
+      const mask = wandMask(sampler, at.px, at.py, this.wandTol, meta.crop)
+      if (!mask) return this.warn('Click on the picture.')
+      const target = e.altKey ? EMPTY : this.landBiome
+      const hit = voteCells(grid, meta, sampler, (i) => (mask[i] ? 1 : -1))
+      const values = new Uint8Array(biomesOf(grid, graph))
+      let changed = 0
+      for (let c = 0; c < graph.n; c++)
+        if (hit[c] === 1 && values[c] !== target) {
+          values[c] = target
+          changed++
+        }
+      if (!changed) return this.warn('Nothing changed: try a higher tolerance.')
+      this.mutate((d) => {
+        d.land!.biome = encodeBytes(values)
       })
       return
     }

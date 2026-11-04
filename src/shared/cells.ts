@@ -44,6 +44,8 @@ export const BIOMES: Biome[] = [
   // Not FMG biomes (it derives relief from height): painted terrain for peaks and hills.
   { id: 14, name: 'Mountains', color: '#a99c86' },
   { id: 15, name: 'Hills', color: '#bfb27e' },
+  { id: 16, name: 'Volcanic', color: '#5b4741' },
+  { id: 17, name: 'Ash waste', color: '#9a8f86' },
 ]
 
 export const isWater = (b: number): boolean => b === OCEAN || b === LAKE

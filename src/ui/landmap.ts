@@ -1,6 +1,6 @@
 import { EMPTY, LAKE, OCEAN, biomeColor, biomesOf, decodeBytes, dropSmallRegions, findCell, graphFor, isWater, regionRings, smoothCells, type Graph } from '../shared/cells'
 import { worldToImage } from '../shared/geo'
-import type { LandGrid, MapImageMeta } from '../shared/types'
+import type { LandGrid, MapImageMeta, Rect } from '../shared/types'
 import { paintSymbols, type Painter } from './terrain'
 
 // Draws the land grid: ocean, a soft shallow-water halo, biomes with smoothed
@@ -22,6 +22,8 @@ const BIOME_SYMBOLS: Record<number, { style: string; density?: number; size?: nu
   12: { style: 'swamp' },
   14: { style: 'peaks', density: 1.2 },
   15: { style: 'hills' },
+  16: { style: 'peaks', density: 0.45 },
+  17: { style: 'desert', density: 0.3 },
 }
 
 interface Built {
@@ -321,3 +323,183 @@ export function seedFromImage(grid: LandGrid, meta: MapImageMeta, sampler: Sampl
   if (opts.minRegion > 1) result = dropSmallRegions(graph, result, opts.minRegion)
   return result
 }
+
+// ── Detection from the picture: magic wand and landmass ─────────────────────
+
+/** The picture's crop in sampler pixels, clamped to the sampler. */
+function cropBox(s: Sampler, crop: Rect | undefined): { x0: number; y0: number; x1: number; y1: number } {
+  const w = s.canvas.width
+  const h = s.canvas.height
+  if (!crop) return { x0: 0, y0: 0, x1: w - 1, y1: h - 1 }
+  return {
+    x0: Math.max(0, Math.floor(crop.x / s.factor)),
+    y0: Math.max(0, Math.floor(crop.y / s.factor)),
+    x1: Math.min(w - 1, Math.ceil((crop.x + crop.w) / s.factor)),
+    y1: Math.min(h - 1, Math.ceil((crop.y + crop.h) / s.factor)),
+  }
+}
+
+/** The picture box-blurred (radius 2), so ink lines, waves and paper grain don't break a region. */
+const blurCache = new WeakMap<Sampler, Float32Array>()
+function blurred(s: Sampler): Float32Array {
+  let out = blurCache.get(s)
+  if (out) return out
+  const w = s.canvas.width
+  const h = s.canvas.height
+  const R = 2
+  const tmp = new Float32Array(w * h * 3)
+  out = new Float32Array(w * h * 3)
+  for (let y = 0; y < h; y++)
+    for (let ch = 0; ch < 3; ch++) {
+      let sum = 0
+      let n = 0
+      for (let x = -R; x <= R; x++) if (x >= 0 && x < w) (sum += s.data[(y * w + x) * 4 + ch]), n++
+      for (let x = 0; x < w; x++) {
+        tmp[(y * w + x) * 3 + ch] = sum / n
+        const add = x + R + 1
+        const drop = x - R
+        if (add < w) (sum += s.data[(y * w + add) * 4 + ch]), n++
+        if (drop >= 0) (sum -= s.data[(y * w + drop) * 4 + ch]), n--
+      }
+    }
+  for (let x = 0; x < w; x++)
+    for (let ch = 0; ch < 3; ch++) {
+      let sum = 0
+      let n = 0
+      for (let y = -R; y <= R; y++) if (y >= 0 && y < h) (sum += tmp[(y * w + x) * 3 + ch]), n++
+      for (let y = 0; y < h; y++) {
+        out[(y * w + x) * 3 + ch] = sum / n
+        const add = y + R + 1
+        const drop = y - R
+        if (add < h) (sum += tmp[(add * w + x) * 3 + ch]), n++
+        if (drop >= 0) (sum -= tmp[(drop * w + x) * 3 + ch]), n--
+      }
+    }
+  blurCache.set(s, out)
+  return out
+}
+
+function distAt(b: Float32Array, i: number, j: number): number {
+  return colorDistance([b[i * 3], b[i * 3 + 1], b[i * 3 + 2]], [b[j * 3], b[j * 3 + 1], b[j * 3 + 2]])
+}
+
+/**
+ * Magic wand: the region connected to an image point, grown over the blurred
+ * picture. A neighbour joins when it is close to the pixel it was reached from
+ * (so gradual shading, like shallows fading into deep sea, is followed) and not
+ * too far from the clicked colour (so it stops at coastlines and borders).
+ * `tol` is the user's tolerance (5 … 200).
+ */
+export function wandMask(s: Sampler, px: number, py: number, tol: number, crop?: Rect): Uint8Array | null {
+  const w = s.canvas.width
+  const b = cropBox(s, crop)
+  const sx = Math.round(px / s.factor)
+  const sy = Math.round(py / s.factor)
+  if (sx < b.x0 || sy < b.y0 || sx > b.x1 || sy > b.y1) return null
+  const bl = blurred(s)
+  const start = sy * w + sx
+  const step = tol * 0.3
+  const cap = tol * 3
+  const mask = new Uint8Array(w * s.canvas.height)
+  const stack = new Int32Array(w * s.canvas.height)
+  let top = 0
+  mask[start] = 1
+  stack[top++] = start
+  const visit = (i: number, from: number) => {
+    if (mask[i] || distAt(bl, i, from) > step || distAt(bl, i, start) > cap) return
+    mask[i] = 1
+    stack[top++] = i
+  }
+  while (top) {
+    const i = stack[--top]
+    const x = i % w
+    const y = (i - x) / w
+    if (x > b.x0) visit(i - 1, i)
+    if (x < b.x1) visit(i + 1, i)
+    if (y > b.y0) visit(i - w, i)
+    if (y < b.y1) visit(i + w, i)
+  }
+  return mask
+}
+
+/** Pixels (anywhere) whose blurred colour is within `limit` of the colour at an image point. */
+function similarTo(s: Sampler, px: number, py: number, limit: number): (i: number) => boolean {
+  const bl = blurred(s)
+  const ref = Math.round(py / s.factor) * s.canvas.width + Math.round(px / s.factor)
+  return (i) => distAt(bl, i, ref) <= limit
+}
+
+/**
+ * Classify cells by voting over five probes per cell. `classOf` maps a sampler
+ * pixel index to a class (or -1 for none); the result is the winning class per
+ * cell, or -1 for cells off the picture or with no votes.
+ */
+export function voteCells(grid: LandGrid, meta: MapImageMeta, s: Sampler, classOf: (i: number) => number): Int16Array {
+  const graph = graphFor(grid)
+  const out = new Int16Array(graph.n).fill(-1)
+  const b = cropBox(s, meta.crop)
+  const w = s.canvas.width
+  const step = Math.max(graph.dx, graph.dy) * 0.22
+  const probes = [
+    [0, 0],
+    [step, 0],
+    [-step, 0],
+    [0, step],
+    [0, -step],
+  ]
+  const votes = new Map<number, number>()
+  for (let c = 0; c < graph.n; c++) {
+    votes.clear()
+    let seen = 0
+    for (const [ox, oy] of probes) {
+      const q = worldToImage(meta.calib, graph.points[2 * c] + ox, graph.points[2 * c + 1] + oy)
+      const sx = Math.round(q.px / s.factor)
+      const sy = Math.round(q.py / s.factor)
+      if (sx < b.x0 || sy < b.y0 || sx > b.x1 || sy > b.y1) continue
+      seen++
+      const k = classOf(sy * w + sx)
+      if (k >= 0) votes.set(k, (votes.get(k) ?? 0) + 1)
+    }
+    if (!seen) continue
+    let best = -1
+    let bestN = 0
+    for (const [k, n] of votes)
+      if (n > bestN) {
+        best = k
+        bestN = n
+      }
+    // A class needs most of the probes that landed on the picture.
+    if (best >= 0 && bestN * 2 > seen) out[c] = best
+  }
+  return out
+}
+
+/**
+ * Landmass from one click on the sea: water connected to the click becomes
+ * ocean, water-coloured patches enclosed by land become lakes, and the rest of
+ * the picture becomes `land`. Cells off the picture keep their biome.
+ */
+export function detectLandmass(grid: LandGrid, meta: MapImageMeta, s: Sampler, px: number, py: number, tol: number, land: number): Uint8Array | null {
+  const sea = wandMask(s, px, py, tol, meta.crop)
+  if (!sea) return null
+  // Lakes: water-coloured but not reached from the sea.
+  const watery = similarTo(s, px, py, tol * 1.6)
+  const SEA = 0
+  const LAKE_K = 1
+  const LAND_K = 2
+  const classes = voteCells(grid, meta, s, (i) => (sea[i] ? SEA : watery(i) ? LAKE_K : LAND_K))
+  const graph = graphFor(grid)
+  const out = new Uint8Array(biomesOf(grid, graph))
+  for (let c = 0; c < graph.n; c++) {
+    const k = classes[c]
+    if (k === SEA) out[c] = OCEAN
+    else if (k === LAKE_K) out[c] = LAKE
+    else if (k === LAND_K) out[c] = land
+  }
+  // Labels, ships and compass roses leave specks: merge tiny islands and lakes away,
+  // touching only the cells on the picture.
+  const clean = dropSmallRegions(graph, smoothCells(graph, out, 1), 5)
+  for (let c = 0; c < graph.n; c++) if (classes[c] >= 0) out[c] = clean[c]
+  return out
+}
+

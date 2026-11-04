@@ -6,10 +6,10 @@ import type { Bounds, Feature, FeatureGeom, FeatureLayer, LayerSettings, Ring } 
 export const LAYER_ORDER: FeatureLayer[] = ['landmass', 'topography', 'terrain', 'props']
 
 export const LAYER_LABEL: Record<FeatureLayer, string> = {
-  landmass: 'Landmass',
+  landmass: 'Outlines',
   topography: 'Topography',
-  terrain: 'Terrain',
-  props: 'Props',
+  terrain: 'Nature',
+  props: 'Landmarks',
 }
 
 export const DEFAULT_LAYER_SETTINGS: Record<FeatureLayer, LayerSettings> = {

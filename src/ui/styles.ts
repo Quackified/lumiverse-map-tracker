@@ -34,6 +34,8 @@ export const CSS = `
 .mt-win-spacer, .mt-spacer { flex: 1; }
 .mt-win-btn { width: 28px; padding: 0; justify-content: center; background: transparent; }
 .mt-win-body { flex: 1; min-height: 0; display: flex; }
+.mt-compact .mt-rs, .mt-compact .mt-win-snap { display: none; }
+.mt-compact .mt-win-bar { cursor: default; }
 .mt-rs { position: absolute; z-index: 30; touch-action: none; }
 .mt-rs-n { top: -3px; left: 10px; right: 10px; height: 7px; cursor: ns-resize; }
 .mt-rs-s { bottom: -3px; left: 10px; right: 10px; height: 7px; cursor: ns-resize; }

@@ -37,6 +37,8 @@ const MIN_AREA = 320
 const HOST_PAD = 12
 const MIN_W = 360
 const MIN_H = 260
+/** Below this viewport width the window just fills the screen (phones). */
+const COMPACT_W = 640
 const STORE_KEY = 'map_tracker.window'
 
 interface Rect {
@@ -137,6 +139,7 @@ export class MapWindow {
 
     const title = h('div', { class: 'mt-win-title' }, icon('map'), h('span', null, opts.title))
     const snapBtn = h('button', { class: 'mt-btn mt-win-btn', title: 'Snap layouts', onclick: (e: Event) => (e.stopPropagation(), this.togglePicker()) }, icon('snap'))
+    snapBtn.classList.add('mt-win-snap')
     const dockBtn = opts.onDock
       ? h('button', { class: 'mt-btn mt-win-btn', title: 'Dock in sidebar', onclick: () => opts.onDock!() }, icon('dock'))
       : null
@@ -164,7 +167,7 @@ export class MapWindow {
     })
     bar.addEventListener('dblclick', (e) => {
       if ((e.target as HTMLElement).closest('button, select, input')) return
-      this.snapTo(this.slot === 'max' ? null : 'max')
+      if (!this.compact()) this.snapTo(this.slot === 'max' ? null : 'max')
     })
     this.frame.addEventListener('pointerdown', (e) => {
       // Keep the host's widget drag out of our presses (see MapApp).
@@ -298,17 +301,29 @@ export class MapWindow {
 
   // ── Geometry ──────────────────────────────────────────────────────────────
 
+  /** Phone-sized screen: no dragging, snapping or resizing, the map fills the screen. */
+  private compact(): boolean {
+    return window.innerWidth < COMPACT_W
+  }
+
   private apply(): void {
-    const r = this.slot ? slotRect(this.slot, this.areaRect(this.area)) : this.clampFloat(this.rect)
+    const compact = this.compact()
+    const ws = this.viewport()
+    const r = compact
+      ? { x: HOST_PAD, y: HOST_PAD, w: ws.w - HOST_PAD * 2, h: ws.h - HOST_PAD * 2 }
+      : this.slot
+        ? slotRect(this.slot, this.areaRect(this.area))
+        : this.clampFloat(this.rect)
+    this.frame.classList.toggle('mt-compact', compact)
     this.place(r)
-    this.frame.dataset.snapped = this.slot ?? ''
+    this.frame.dataset.snapped = compact ? 'max' : (this.slot ?? '')
     this.syncPoll()
   }
 
   private clampFloat(r: Rect): Rect {
     const ws = this.viewport()
-    const w = Math.max(MIN_W, Math.min(r.w, ws.w))
-    const hh = Math.max(MIN_H, Math.min(r.h, ws.h))
+    const w = Math.max(Math.min(MIN_W, ws.w), Math.min(r.w, ws.w))
+    const hh = Math.max(Math.min(MIN_H, ws.h), Math.min(r.h, ws.h))
     const x = Math.max(ws.x - w + 80, Math.min(r.x, ws.x + ws.w - 80))
     const y = Math.max(ws.y, Math.min(r.y, ws.y + ws.h - 40))
     return { x, y, w, h: hh }
@@ -378,6 +393,7 @@ export class MapWindow {
   }
 
   private startDrag(e: PointerEvent): void {
+    if (this.compact()) return
     const target = e.currentTarget as HTMLElement
     target.setPointerCapture(e.pointerId)
     let start = { ...this.current }
@@ -430,6 +446,7 @@ export class MapWindow {
   }
 
   private startResize(e: PointerEvent, dir: string): void {
+    if (this.compact()) return
     e.preventDefault()
     e.stopPropagation()
     const el = e.currentTarget as HTMLElement
